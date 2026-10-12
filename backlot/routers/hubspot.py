@@ -585,6 +585,40 @@ def _token_at(raw: bytes, path: tuple) -> tuple[int, int]:
     return text.count("\n", 0, pos) + 1, column
 
 
+# A JSON string, or one of the three number tokens `json.loads` reads and JSON does not have. A
+# string is matched so that a token spelled inside one is passed over.
+_NON_STANDARD_NUMBER = re.compile(r'"(?:[^"\\]|\\.)*"|-?Infinity|NaN')
+
+
+def _refuse_a_non_standard_number(raw: bytes) -> JSONResponse | None:
+    """Real's 400 for the first `NaN`, `Infinity` or `-Infinity` in a POST body, or None.
+
+    Measured against api.hubapi.com on 2026-10-12, on companies `batch/read` and `search`: real
+    refuses the token wherever it stands (as `inputs`, an element of `inputs`, `properties`,
+    `limit`, `after` or a filter's `value`), names it with its sign, and gives the column just past
+    it, in an envelope with no `category`. `json.loads` reads the three as floats, so without this
+    the routes answer for a float there. The column is counted as `_token_at` counts one. Not
+    measured: a body that also holds a member real refuses for its type ahead of the token; the
+    token is refused first here."""
+    text = raw.decode(json.detect_encoding(raw), "surrogatepass")
+    for found in _NON_STANDARD_NUMBER.finditer(text):
+        token = found[0]
+        if token.startswith('"'):
+            continue
+        line_start = text.rfind("\n", 0, found.end()) + 1
+        column = len(text[line_start : found.end()].encode("utf-8", "surrogatepass")) + 1
+        line = text.count("\n", 0, found.end()) + 1
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": f"Invalid input JSON on line {line}, column {column}: Non-standard "
+                f"token '{token}': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow",
+            },
+        )
+    return None
+
+
 def _refuse_an_operator(raw: bytes, body: dict) -> JSONResponse | None:
     """Real's 400 for the first filter, in body order, whose operator it cannot read, or None.
 
@@ -955,6 +989,9 @@ async def search_objects(object_type: str, request: Request):
     if spellings is None:
         return _unknown_type(object_type)
     body = await json_body(request)
+    refused = body and _refuse_a_non_standard_number(await request.body())
+    if refused:
+        return refused
     # Before `after`: real refuses the operator first when the cursor is one it can parse but
     # names no record (measured 2026-10-06).
     refused = _refuse_an_operator(await request.body(), body)
@@ -1020,6 +1057,9 @@ async def batch_read(object_type: str, request: Request):
     if spellings is None:
         return _unknown_type(object_type)
     body = await json_body(request)
+    refused = body and _refuse_a_non_standard_number(await request.body())
+    if refused:
+        return refused
     refused = _refuse_a_batch_read_shape(await request.body(), body)
     if refused is not None:
         return refused

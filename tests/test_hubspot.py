@@ -1054,6 +1054,67 @@ def test_hubspot_batch_read_refuses_a_body_real_cannot_read(
         assert r.status_code == want
 
 
+_A_FILTER = '{"filterGroups":[{"filters":[{"propertyName":"name","operator":"EQ","value":%s}]}]}'
+
+
+@pytest.mark.parametrize(
+    "route, raw, column, token",
+    [
+        ("batch/read", '{"inputs":NaN}', 14, "NaN"),
+        ("batch/read", '{"inputs":[NaN]}', 15, "NaN"),
+        ("batch/read", '{"inputs":[Infinity]}', 20, "Infinity"),
+        ("batch/read", '{"inputs":[-Infinity]}', 21, "-Infinity"),
+        ("batch/read", _ONE + '"properties":NaN}', 40, "NaN"),
+        ("search", '{"limit":NaN}', 13, "NaN"),
+        ("search", '{"limit":Infinity}', 18, "Infinity"),
+        ("search", '{"after":NaN}', 13, "NaN"),
+        ("search", _A_FILTER % "NaN", 80, "NaN"),
+    ],
+    ids=[
+        "inputs",
+        "an-input",
+        "an-input-infinity",
+        "an-input-minus-infinity",
+        "properties",
+        "limit",
+        "limit-infinity",
+        "after",
+        "a-filter-value",
+    ],
+)
+def test_hubspot_refuses_a_non_standard_number_token(client, admin_h, route, raw, column, token):
+    """`_refuse_a_non_standard_number`'s rule, one body per row: real's 400 for a `NaN`, `Infinity`
+    or `-Infinity`, naming the token and the column just past it, with no `category`."""
+    headers = {"Content-Type": "application/json", **admin_h}
+    r = client.post(f"/hubspot/crm/v3/objects/companies/{route}", headers=headers, content=raw)
+    assert (r.status_code, r.json()) == (
+        400,
+        {
+            "status": "error",
+            "message": f"Invalid input JSON on line 1, column {column}: Non-standard token "
+            f"'{token}': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "route, raw, status",
+    [
+        ("batch/read", '{"inputs":["NaN"]}', 207),
+        ("batch/read", '{"inputs":[{"id":"-Infinity"}]}', 207),
+        ("search", '{"query":"Infinity"}', 200),
+        ("search", _A_FILTER % '"a \\"NaN\\" b"', 200),
+    ],
+    ids=["an-id", "an-id-in-an-object", "a-query", "a-filter-value-with-quotes"],
+)
+def test_hubspot_reads_a_number_token_spelled_inside_a_string(client, admin_h, route, raw, status):
+    """The three spellings are refused as tokens only: inside a string they are text, and the
+    routes answer as they do for any other string there."""
+    headers = {"Content-Type": "application/json", **admin_h}
+    r = client.post(f"/hubspot/crm/v3/objects/companies/{route}", headers=headers, content=raw)
+    assert r.status_code == status
+
+
 @pytest.mark.parametrize(
     "inputs, caller, status",
     [
