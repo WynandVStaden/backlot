@@ -333,9 +333,12 @@ def test_s3_a_head_at_the_service_root_is_the_405_without_its_body(live_server, 
     assert _signed(base_url, path, settings.admin_token).status_code == 200
 
 
-# The queries real answered alike at a bucket's path with and without a trailing slash, on a GET
-# and on a HEAD: the same status, header names and body once the request ids are set aside
-# (s3.amazonaws.com, us-east-1, 2026-10-11).
+# What real answered alike at a bucket's path with and without a trailing slash: the same status,
+# header names and body once the request ids are set aside (s3.amazonaws.com, us-east-1; the GET and
+# HEAD rows on 2026-10-11, the others on 2026-10-13). On the second date no pair differed among the
+# methods `bucket_method_refusal` takes, each sent to another account's bucket with no query, with
+# `versionId` alone and with each selector of `_BUCKET_WRITE_SELECTORS` and
+# `_OBJECT_WRITE_SELECTORS`.
 _BUCKET_QUERIES = [
     "",
     "?list-type=2",
@@ -346,11 +349,19 @@ _BUCKET_QUERIES = [
     "?max-keys=abc",
     "?acl",
 ]
+_BUCKET_SLASH_ROWS = [
+    *((method, query) for query in _BUCKET_QUERIES for method in ("GET", "HEAD")),
+    ("POST", ""),
+    ("POST", "?restore"),
+    ("PATCH", ""),
+    ("PUT", "?versionId=x"),
+    ("DELETE", "?uploadId=u"),
+    ("DELETE", "?retention"),
+]
 
 
-@pytest.mark.parametrize("method", ["GET", "HEAD"])
-@pytest.mark.parametrize("query", _BUCKET_QUERIES)
-def test_s3_a_bucket_path_ending_in_a_slash_is_the_bucket(live_server, query, method):
+@pytest.mark.parametrize("method, query", _BUCKET_SLASH_ROWS)
+def test_s3_a_bucket_path_ending_in_a_slash_is_the_bucket(live_server, method, query):
     """The bucket's own answer, not a key's: `/{bucket}/` is not the key `""` in that bucket."""
     base_url, settings = live_server
     bare, slashed = (
@@ -530,6 +541,8 @@ def test_s3_a_request_in_a_bucket_the_caller_cannot_see_is_nosuchbucket(live_ser
         ("DELETE", "/s3/people-vault", 501),
         ("POST", "/s3/people-vault?delete", 400),
         ("POST", "/s3/people-vault?restore", 400),
+        ("POST", "/s3/people-vault/?restore", 400),
+        ("DELETE", "/s3/people-vault/?uploadId=u", 400),
         # A write's checks come after the bucket, so the scoped caller is told there is none
         # whatever the request carries, where the admin gets the check's 400.
         ("POST", "/s3/people-vault/comp/bands.csv?delete", 400, {"Content-MD5": "garbage"}),
@@ -542,6 +555,8 @@ def test_s3_a_request_in_a_bucket_the_caller_cannot_see_is_nosuchbucket(live_ser
         ("DELETE", "/s3/people-vault/x.txt?tagging", 501),
         ("GET", "/s3/people-vault/comp/bands.csv", 200),
         ("HEAD", "/s3/people-vault/comp/bands.csv", 200),
+        ("GET", "/s3/people-vault/comp/bands.csv", 304, {"If-None-Match": "*"}),
+        ("HEAD", "/s3/people-vault/comp/bands.csv", 412, {"If-Match": '"0000"'}),
         ("HEAD", "/s3/people-vault", 200),
         ("GET", "/s3/people-vault/", 200),
         ("HEAD", "/s3/people-vault/", 200),
@@ -1933,6 +1948,16 @@ _PART_2_MISSING = (416, "InvalidPartNumber", _NO_SUCH_PART.format(2))
 _NULL_VERSION_MISSING = (404, "NoSuchVersion", "<VersionId>null</VersionId>")
 _CHECKSUM_MODE_REFUSED = (400, "InvalidRequest", _BAD_CHECKSUM_MODE)
 _GARBAGE_MODE = {"x-amz-checksum-mode": "garbage"}
+_NOT_LATIN_1 = (
+    400,
+    "InvalidArgument",
+    "ISO-8859-1.</Message>" + _argued("response-content-type", "\ud55c"),
+)
+_OPEN_QUOTE = (
+    400,
+    "InvalidArgument",
+    "open quoted span.</Message>" + _argued("response-content-type", 'a"b'),
+)
 
 # Where each of an object's refusals sits against the bucket and the credential, as real answered
 # (2026-09-29, us-east-1): at a key in a bucket that does not exist (`absent`), at the object over a
@@ -2042,6 +2067,29 @@ _OBJECT_ORDER_ROWS = [
     ("present", "", {**_GARBAGE_MODE, "Range": "bytes=999-"},
      416, "InvalidRange", "not satisfiable"),
     ("present", "partNumber=1", {**_GARBAGE_MODE, "Range": "bytes=0-1"}, *_PART_BESIDE_RANGE),
+    # The values `backlot.routers.s3._response_override_refusal` refuses, where its docstring puts
+    # them, and the same request with a value it sends.
+    ("absent", "response-content-type=%ED%95%9C", {}, *_NOT_LATIN_1),
+    ("tampered", "response-content-type=%ED%95%9C", {}, *_NOT_LATIN_1),
+    ("missing", "response-content-type=a%22b", {}, *_OPEN_QUOTE),
+    ("present", "acl&response-content-type=a%22b", {}, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b&partNumber=abc", {}, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b&versionId=garbage", {}, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b", {"Range": "bytes=999-"}, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b", _GARBAGE_MODE, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b", {"If-None-Match": "*"}, *_OPEN_QUOTE),
+    ("present", "response-content-type=a%22b", {"If-Match": '"0000"'}, *_OPEN_QUOTE),
+    ("present", "response-content-type=%ED%95%9C&response-content-type=text/csv", {},
+     *_NOT_LATIN_1),
+    ("present", "response-content-disposition=attachment%3B%20filename%3D%22%ED%95%9C.txt%22", {},
+     400, "InvalidArgument",
+     _argued("response-content-disposition", 'attachment; filename="\ud55c.txt"')),
+    ("present", "response-expires=%22a%5C%22", {},
+     400, "InvalidArgument", _argued("response-expires", '"a\\"')),
+    ("present", "response-cache-control=a%C4%80b", {},
+     400, "InvalidArgument", _argued("response-cache-control", "a\u0100b")),
+    ("absent", "response-content-type=text/csv", {}, *_BUCKET_ABSENT),
+    ("tampered", "response-content-type=text/csv", {}, *_SIGNATURE_MISMATCH),
 ]
 # fmt: on
 
@@ -2134,6 +2182,217 @@ def test_an_objects_own_answer_is_what_real_sends_for_its_object(
         crc = s3_router._crc64nvme(OBJECT_TEXT) if checksum else None
         assert r.headers.get("x-amz-checksum-crc64nvme") == crc, method
         assert r.headers.get("x-amz-checksum-type") == ("FULL_OBJECT" if checksum else None), method
+
+
+# The response overrides `backlot.routers.s3._response_overrides` reads: the query, the request's
+# headers, and each header the answer sets. A header a row does not name is the object's own: its
+# type, and none of the other five.
+_RESPONSE_OVERRIDE_ROWS = [
+    ("response-content-type=text/csv", {}, {"content-type": "text/csv"}),
+    ("response-content-language=ko", {}, {"content-language": "ko"}),
+    ("response-expires=garbage", {}, {"expires": "garbage"}),
+    ("response-cache-control=no-cache", {}, {"cache-control": "no-cache"}),
+    (
+        "response-content-disposition=attachment%3B%20filename%3D%22x.txt%22",
+        {},
+        {"content-disposition": 'attachment; filename="x.txt"'},
+    ),
+    ("response-content-encoding=gzip", {}, {"content-encoding": "gzip"}),
+    ("response-content-type=", {}, {"content-type": ""}),
+    (
+        "response-content-type=text/csv&response-cache-control=no-cache",
+        {},
+        {"content-type": "text/csv", "cache-control": "no-cache"},
+    ),
+    ("response-content-type=text/csv", {"Range": "bytes=0-3"}, {"content-type": "text/csv"}),
+    ("Response-Content-Type=text/csv", {}, {}),
+    # the first value of a repeated name
+    ("response-content-type=a/b&response-content-type=c/d", {}, {"content-type": "a/b"}),
+    ("response-content-type=&response-content-type=text/csv", {}, {"content-type": ""}),
+    # a control character as a space, and a tab, a Latin-1 letter and a closed quote as sent
+    ("response-content-type=a%01b", {}, {"content-type": "a b"}),
+    ("response-content-language=a%0D%0Ab", {}, {"content-language": "a  b"}),
+    ("response-expires=a%7Fb", {}, {"expires": "a b"}),
+    ("response-content-type=a%09b", {}, {"content-type": "a\tb"}),
+    ("response-content-disposition=%C3%BF", {}, {"content-disposition": "\xff"}),
+    ("response-cache-control=%22a%22b", {}, {"cache-control": '"a"b'}),
+    ("response-content-encoding=a%5C%22b", {}, {"content-encoding": 'a\\"b'}),
+    ("response-content-language=%22a%5C%22b%22", {}, {"content-language": '"a\\"b"'}),
+]
+
+
+@pytest.mark.parametrize("query, headers, expected", _RESPONSE_OVERRIDE_ROWS)
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_object_response_overrides_keep_the_object_bytes(
+    live_server, query, headers, expected, method
+):
+    import httpx
+
+    base_url, settings = live_server
+    etag = _signed(base_url, OBJECT_PATH, settings.admin_token).headers["etag"]
+    url, signed = _sign_get(
+        base_url,
+        f"{OBJECT_PATH}?{query}",
+        settings.admin_token,
+        method=method,
+        extra_headers=headers,
+    )
+    first, last = 0, len(OBJECT_TEXT) - 1
+    if "Range" in headers:
+        first, last = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+    # Read wire bytes, not decoded gzip: an override declares an encoding, but does not transform
+    # the stored object.
+    with httpx.stream(method, url, headers=signed) as response:
+        assert response.status_code == (206 if "Range" in headers else 200)
+        for name in (
+            "content-type",
+            "content-language",
+            "expires",
+            "cache-control",
+            "content-disposition",
+            "content-encoding",
+        ):
+            own = "text/markdown" if name == "content-type" else None
+            assert response.headers.get(name) == expected.get(name, own), name
+        assert response.headers["etag"] == etag
+        assert response.headers["content-length"] == str(last - first + 1)
+        body = OBJECT_TEXT[first : last + 1] if method == "GET" else b""
+        assert b"".join(response.iter_raw()) == body
+
+
+@pytest.mark.parametrize("signature_version", ["s3v4", "s3"])
+def test_object_response_overrides_on_a_presigned_url(live_server, signature_version):
+    import boto3
+    import httpx
+    from botocore.config import Config
+
+    base_url, settings = live_server
+    client = boto3.client(
+        "s3",
+        endpoint_url=base_url + "/s3",
+        region_name="us-east-1",
+        aws_access_key_id=synth.s3_access_key_id(settings.admin_token),
+        aws_secret_access_key=synth.s3_secret_access_key(settings.admin_token),
+        config=Config(signature_version=signature_version, s3={"addressing_style": "path"}),
+    )
+    url = client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": "eng-artifacts",
+            "Key": "runbooks/oncall.md",
+            "ResponseContentType": "text/csv",
+        },
+        ExpiresIn=60,
+    )
+    response = httpx.get(url)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/csv"
+    assert response.content == OBJECT_TEXT
+
+
+_REFUSED_UNSIGNED = (
+    400,
+    "InvalidRequest",
+    "Request specific response headers cannot be used for anonymous GET requests.",
+)
+# An unsigned request carrying an override, as `backlot.routers.s3.object_get` answers it, beside
+# the same request without one: the path, then the status, code and message of the GET's answer,
+# and the status of the HEAD's.
+_UNSIGNED_OVERRIDE_ROWS = [
+    (f"{OBJECT_PATH}?response-content-type=text/csv", *_REFUSED_UNSIGNED, 400),
+    (f"{OBJECT_PATH}?response-content-type=", *_REFUSED_UNSIGNED, 400),
+    (f"{OBJECT_PATH}?response-content-type=text/csv&versionId=null", *_REFUSED_UNSIGNED, 400),
+    ("/s3/eng-artifacts/no/such.md?response-content-type=text/csv", *_REFUSED_UNSIGNED, 400),
+    # Real's `NoSuchBucket`; every name is refused alike here (`backlot.routers.s3.object_get`).
+    ("/s3/no-such-bucket/k.txt?response-content-type=text/csv", *_REFUSED_UNSIGNED, 400),
+    # Real's `AccessDenied`, which an unsigned caller is answered with `NoSuchBucket` for here
+    # (`backlot.routers.s3._auth`).
+    (OBJECT_PATH, 404, "NoSuchBucket", _NO_BUCKET, 404),
+    (f"{OBJECT_PATH}?Response-Content-Type=text/csv", 404, "NoSuchBucket", _NO_BUCKET, 404),
+    (
+        f"{OBJECT_PATH}?response-content-type=text/csv&versionId=x",
+        404,
+        "NoSuchBucket",
+        _NO_BUCKET,
+        404,
+    ),
+    (f"{OBJECT_PATH}?acl&response-content-type=text/csv", 404, "NoSuchBucket", _NO_BUCKET, 405),
+]
+
+
+@pytest.mark.parametrize(
+    "path, status, code, message, head_status",
+    _UNSIGNED_OVERRIDE_ROWS,
+    ids=[r[0].removeprefix("/s3/") for r in _UNSIGNED_OVERRIDE_ROWS],
+)
+def test_object_response_overrides_refuse_an_unsigned_get_or_head(
+    live_server, path, status, code, message, head_status
+):
+    import httpx
+
+    base_url, _settings = live_server
+    response = httpx.get(base_url + path)
+    assert response.status_code == status
+    assert f"<Code>{code}</Code><Message>{message}</Message>" in response.text
+    head = httpx.head(base_url + path)
+    assert (head.status_code, head.content) == (head_status, b"")
+
+
+def test_object_response_overrides_do_not_bypass_credentials_or_acl(live_server, tokens):
+    base_url, settings = live_server
+    query = "?response-content-type=text/csv"
+    url, headers = _sign_get(
+        base_url,
+        OBJECT_PATH + query,
+        settings.admin_token,
+        tamper=True,
+    )
+    import httpx
+
+    tampered = httpx.get(url, headers=headers)
+    assert tampered.status_code == 403
+    assert "<Code>SignatureDoesNotMatch</Code>" in tampered.text
+    scoped = _signed(
+        base_url,
+        "/s3/people-vault/comp/bands.csv" + query,
+        tokens["ava@acme.com"],
+    )
+    assert scoped.status_code == 404
+    assert "<Code>NoSuchBucket</Code>" in scoped.text
+    assert scoped.headers["content-type"] == "application/xml"
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize(
+    "path, extra_headers, status",
+    [
+        (OBJECT_PATH + "?response-content-type=text/csv", {"Range": "bytes=1000-2000"}, 416),
+        ("/s3/eng-artifacts/missing?response-content-type=text/csv", {}, 404),
+        (OBJECT_PATH + "?tagging&response-content-type=text/csv", {}, 200),
+    ],
+)
+def test_object_response_overrides_do_not_relabel_other_answers(
+    live_server, method, path, extra_headers, status
+):
+    base_url, settings = live_server
+    original_path = path.replace("&response-content-type=text/csv", "").replace(
+        "?response-content-type=text/csv", ""
+    )
+    original = _signed(
+        base_url, original_path, settings.admin_token, method=method, extra_headers=extra_headers
+    )
+    response = _signed(
+        base_url,
+        path,
+        settings.admin_token,
+        method=method,
+        extra_headers=extra_headers,
+    )
+    assert response.status_code == original.status_code
+    if method == "GET":
+        assert response.status_code == status
+    assert response.headers.get("content-type") != "text/csv"
+    assert response.headers.get("content-type") == original.headers.get("content-type")
 
 
 def test_an_objects_attributes_size_is_its_bytes(tmp_path):
@@ -2749,6 +3008,12 @@ _HEAD_ROWS = [
     (f"{OBJECT_PATH}?acl", "admin", {"x-amz-checksum-mode": "garbage"}, 405, None),
     ("/s3/no-such-bucket/a.txt?versioning&versionId=x", "admin", {}, 400, None),
     ("/s3/no-such-bucket/a.txt?attributes", "admin", {"x-amz-object-attributes": ","}, 405, None),
+    # An override value `backlot.routers.s3._response_override_refusal` refuses, ahead of the
+    # bucket, the credential and a selector's 405, and an unsigned HEAD carrying an override.
+    (f"{OBJECT_PATH}?response-content-type=%ED%95%9C", "admin", {}, 400, None),
+    ("/s3/no-such-bucket/a.txt?response-content-type=a%22b", "admin", {}, 400, None),
+    (f"{OBJECT_PATH}?acl&response-content-type=a%22b", "tampered", {}, 400, None),
+    (f"{OBJECT_PATH}?response-content-type=text/csv", None, {}, 400, None),
 ]
 # fmt: on
 
@@ -6172,3 +6437,208 @@ def test_a_prefix_or_marker_no_character_steps_past_is_a_page_not_a_500(
         r = _s3_get(big_bucket_client, f"/s3/encoded-bucket?{query}", token)
         assert r.status_code == 200, (query, r.status_code, r.text[:200])
         assert ET.fromstring(r.text).tag == f"{{{S3NS}}}ListBucketResult", query
+
+
+_IM, _INM = "If-Match", "If-None-Match"
+_IMS, _IUS = "If-Modified-Since", "If-Unmodified-Since"
+_BAD_MODE = ("x-amz-checksum-mode", "bogus")
+_UNSATISFIABLE = ("Range", "bytes=100-200")
+_SIX_OVERRIDES = (
+    "response-content-type=text%2Fx-probe&response-content-language=ko"
+    "&response-expires=Thu%2C%2001%20Jan%202099%2000%3A00%3A00%20GMT"
+    "&response-cache-control=no-cache"
+    "&response-content-disposition=attachment%3B%20filename%3D%22a.txt%22"
+    "&response-content-encoding=identity"
+)
+
+# Real S3's answer to each condition (`_precondition` in `backlot.routers.s3` has the dates), which
+# a GET and a HEAD of a 12-byte object got alike: the headers sent, a header named twice sent as two
+# lines, the query, the status and the condition a 412 names. `{etag}` is the object's ETag,
+# `{bare}` the same unquoted and `{upper}` in upper case; `{lm}` is its Last-Modified, `{before}` a
+# day earlier, `{after}` a second later and `{prev}` the last day of the month before, each written
+# as the row formats it.
+# fmt: off
+_CONDITION_ROWS = [
+    # An ETag condition (`backlot.routers.s3._etag_matches`).
+    ([(_INM, "{etag}")], "", 304, None),
+    ([(_INM, "{bare}")], "", 304, None),
+    ([(_INM, "W/{etag}")], "", 304, None),
+    ([(_INM, "w/{etag}")], "", 304, None),
+    ([(_INM, "W/W/{etag}")], "", 304, None),
+    ([(_INM, "x{etag}y")], "", 304, None),
+    ([(_INM, "*")], "", 304, None),
+    ([(_INM, '"*"')], "", 304, None),
+    ([(_INM, '"0000", {etag}')], "", 304, None),
+    ([(_INM, '"0000" {bare}')], "", 304, None),
+    ([(_INM, '"0000";{etag}')], "", 304, None),
+    ([(_INM, '" {bare} "')], "", 304, None),
+    ([(_INM, 'W/"0000",{bare}')], "", 304, None),
+    ([(_INM, '"0000"'), (_INM, "{etag}")], "", 304, None),
+    ([(_INM, "W/{bare}")], "", 200, None),
+    ([(_INM, "W/*")], "", 200, None),
+    ([(_INM, '"0000";{bare}')], "", 200, None),
+    ([(_INM, "'{bare}'")], "", 200, None),
+    ([(_INM, "{upper}")], "", 200, None),
+    ([(_INM, '"0000"')], "", 200, None),
+    ([(_INM, "")], "", 200, None),
+    ([(_IM, "{etag}")], "", 200, None),
+    ([(_IM, "w/{etag}")], "", 200, None),
+    ([(_IM, '"*"')], "", 200, None),
+    ([(_IM, '"0000", {bare}')], "", 200, None),
+    ([(_IM, '"0000"'), (_IM, "{etag}")], "", 200, None),
+    ([(_IM, '"0000"')], "", 412, _IM),
+    ([(_IM, "W/{bare}")], "", 412, _IM),
+    ([(_IM, "W/*")], "", 412, _IM),
+    ([(_IM, '"0000";{bare}')], "", 412, _IM),
+    ([(_IM, "{upper}")], "", 412, _IM),
+    ([(_IM, "")], "", 412, _IM),
+    # A date (`backlot.routers.s3._http_date`), and an `If-Modified-Since` only up to now.
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 304, None),
+    ([(_IMS, "{lm:%A, %d-%b-%y %H:%M:%S GMT}")], "", 304, None),
+    ([(_IMS, "{lm:%a %b} {lm.day:2} {lm:%H:%M:%S %Y}")], "", 304, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S} GMT+00:00")], "", 304, None),
+    ([(_IMS, "{after:%a, %d %b %Y %H:%M:%S GMT}")], "", 304, None),
+    ([(_IMS, "{lm:%a, %d %b %y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IMS, "{lm:%d %b %Y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S} UT")], "", 200, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S} Z")], "", 200, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S}")], "", 200, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT} xyz")], "", 200, None),
+    ([(_IMS, "{lm:%Y%m%dT%H%M%SZ}")], "", 200, None),
+    ([(_IMS, "{before:%a, %d %b %Y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IMS, "Fri, 01 Jan 2100 00:00:00 GMT")], "", 200, None),
+    ([(_IMS, "Tue, 13 Oct 10000 00:00:00 GMT")], "", 200, None),
+    ([(_IMS, "garbage")], "", 200, None),
+    ([(_IMS, "garbage"), (_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IMS, "")], "", 200, None),
+    ([(_IUS, "{before:%a, %d %b %Y %H:%M:%S GMT}")], "", 412, _IUS),
+    ([(_IUS, "Thu, 32 {prev:%b %Y} 00:00:00 GMT")], "", 412, _IUS),
+    ([(_IUS, "Thu, 01 Jan 1970 00:00:00 GMT")], "", 412, _IUS),
+    ([(_IUS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IUS, "{before:%a, %d %b %y %H:%M:%S GMT}")], "", 200, None),
+    ([(_IUS, "Wed, 31 Dec 1969 23:59:59 GMT")], "", 200, None),
+    ([(_IUS, "Thu, 01 Jan 1970 00:00:00 +0100")], "", 200, None),
+    ([(_IUS, "garbage")], "", 200, None),
+    ([(_IUS, "{before:%a, %d %b %Y %H:%M:%S GMT}"), (_IUS, "Fri, 01 Jan 2100 00:00:00 GMT")],
+     "", 412, _IUS),
+    # Two conditions at once, in RFC 9110's order.
+    ([(_IM, '"0000"'), (_IUS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 412, _IM),
+    ([(_IM, "{etag}"), (_IUS, "Thu, 01 Jan 1970 00:00:00 GMT")], "", 200, None),
+    ([(_IM, "{etag}"), (_INM, "{etag}")], "", 304, None),
+    ([(_IM, '"0000"'), (_INM, "{etag}")], "", 412, _IM),
+    ([(_IUS, "{before:%a, %d %b %Y %H:%M:%S GMT}"), (_INM, "{etag}")], "", 412, _IUS),
+    ([(_INM, "{etag}"), (_IMS, "{before:%a, %d %b %Y %H:%M:%S GMT}")], "", 304, None),
+    ([(_INM, '"0000"'), (_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 200, None),
+    # Ahead of a range or a part the object lacks, and beside the ones it has.
+    ([(_IM, '"0000"'), _UNSATISFIABLE], "", 412, _IM),
+    ([(_INM, "{etag}"), _UNSATISFIABLE], "", 304, None),
+    ([(_INM, "{etag}"), ("Range", "bytes=0-3")], "", 304, None),
+    ([(_IM, "{etag}"), ("Range", "bytes=0-3")], "", 206, None),
+    ([(_IM, '"0000"')], "partNumber=2", 412, _IM),
+    ([(_INM, "{etag}")], "partNumber=2", 304, None),
+    ([(_INM, "{etag}")], "partNumber=1", 304, None),
+    ([(_INM, '"0000"')], "partNumber=1", 206, None),
+    ([(_INM, "{etag}")], "versionId=null", 304, None),
+    ([(_IM, '"0000"')], "versionId=null", 412, _IM),
+    # Beside the response overrides, which a 304 carries but the type and a 412 does not.
+    ([(_INM, "{etag}")], "response-content-type=text%2Fx-probe", 304, None),
+    ([(_INM, "{etag}")], _SIX_OVERRIDES, 304, None),
+    ([(_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], _SIX_OVERRIDES, 304, None),
+    ([(_INM, "{etag}"), ("Range", "bytes=0-3")], _SIX_OVERRIDES, 304, None),
+    ([(_IM, '"0000"')], _SIX_OVERRIDES, 412, _IM),
+    ([(_IUS, "{before:%a, %d %b %Y %H:%M:%S GMT}")], _SIX_OVERRIDES, 412, _IUS),
+    # A good checksum mode is no obstacle, and a bad one is refused ahead of a 304 and a 412.
+    ([("x-amz-checksum-mode", "ENABLED"), (_INM, "{etag}")], "", 304, None),
+    ([("x-amz-checksum-mode", "ENABLED"), (_IM, '"0000"')], "", 412, _IM),
+    ([_BAD_MODE, (_IM, '"0000"')], "", 400, None),
+    ([_BAD_MODE, (_INM, "{etag}")], "", 400, None),
+    ([_BAD_MODE, (_IMS, "{lm:%a, %d %b %Y %H:%M:%S GMT}")], "", 400, None),
+    ([("x-amz-checksum-mode", ""), (_IM, '"0000"')], "", 400, None),
+    ([_BAD_MODE, (_IM, '"0000"'), _UNSATISFIABLE], "", 400, None),
+    ([_BAD_MODE, (_IM, '"0000"')], "partNumber=2", 400, None),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize(
+    "sent, query, status, condition",
+    _CONDITION_ROWS,
+    ids=[
+        "&".join(f"{name}:{value}" for name, value in r[0]) + (f"?{r[1]}" if r[1] else "")
+        for r in _CONDITION_ROWS
+    ],
+)
+def test_an_objects_conditions_answer_as_real_s3_does(live_server, sent, query, status, condition):
+    """Each row on a GET and a HEAD: a 304 carries the ETag, the Last-Modified and the overrides
+    but the type, and none of the object's own headers, a 412 names its condition and carries no
+    override, a 400 the checksum mode, and the rest is the object's own answer."""
+    import httpx
+
+    base_url, settings = live_server
+    plain = _signed(base_url, OBJECT_PATH, settings.admin_token)
+    etag, lm = plain.headers["etag"], plain.headers["last-modified"]
+    moment = datetime.strptime(lm, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+    values = {
+        "etag": etag,
+        "bare": etag.strip('"'),
+        "upper": etag.upper(),
+        "lm": moment,
+        "before": moment - timedelta(days=1),
+        "after": moment + timedelta(seconds=1),
+        "prev": moment.replace(day=1) - timedelta(days=1),
+    }
+    sent = [(name, value.format(**values)) for name, value in sent]
+    names = [name for name, _ in sent]
+    signed_headers = {name: value for name, value in sent if names.count(name) == 1}
+    repeated = [(name, value) for name, value in sent if names.count(name) > 1]
+    path = f"{OBJECT_PATH}?{query}" if query else OBJECT_PATH
+    # Each override but the type, under the header it names.
+    carried = {
+        name.removeprefix("response-"): value
+        for name, value in parse_qsl(query)
+        if name.startswith("response-") and name != "response-content-type"
+    }
+    for method in ("GET", "HEAD"):
+        url, signed = _sign_get(
+            base_url, path, settings.admin_token, method=method, extra_headers=signed_headers
+        )
+        r = httpx.request(method, url, headers=[*signed.items(), *repeated])
+        assert r.status_code == status, (method, r.text)
+        if status == 304:
+            assert r.content == b"", method
+            gateway = {"date", "server", "x-amz-request-id", "x-amz-id-2"}
+            own = {name: value for name, value in r.headers.items() if name not in gateway}
+            assert own == {"etag": etag, "last-modified": lm, **carried}, method
+        elif status in (400, 412):
+            assert r.headers["content-type"] == "application/xml", method
+            assert "x-amz-server-side-encryption" not in r.headers, method
+            assert not set(carried) & set(r.headers), method
+            if method == "HEAD":
+                assert r.content == b"" and "content-length" not in r.headers
+            elif status == 400:
+                assert (
+                    "<Code>InvalidRequest</Code><Message>Value for x-amz-checksum-mode header is "
+                    "invalid.</Message>" in r.text
+                )
+            else:
+                assert (
+                    "<Code>PreconditionFailed</Code><Message>At least one of the pre-conditions "
+                    f"you specified did not hold</Message><Condition>{condition}</Condition>"
+                    in r.text
+                )
+        else:
+            assert r.headers["etag"] == etag, method
+            assert r.headers["x-amz-server-side-encryption"] == "AES256", method
+            length = int(r.headers["content-length"])
+            assert r.content == (OBJECT_TEXT[:length] if method == "GET" else b""), method
+
+
+@pytest.mark.parametrize("selector", ["tagging", "acl"])
+@pytest.mark.parametrize("condition", [{"If-Match": '"0000"'}, {"If-None-Match": "*"}])
+def test_a_condition_is_not_read_beside_an_objects_subresource(live_server, selector, condition):
+    """A key's `?tagging` and `?acl` read no condition (`backlot.routers.s3.object_get`)."""
+    base_url, settings = live_server
+    r = _signed(
+        base_url, f"{OBJECT_PATH}?{selector}", settings.admin_token, extra_headers=condition
+    )
+    assert r.status_code == 200

@@ -38,13 +38,14 @@ import contextvars
 import hashlib
 import re
 import zlib
+from datetime import datetime, timezone
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 import xxhash
 from fastapi import APIRouter, Request, Response
 
-from backlot import auth, sigv4, store, synth
+from backlot import auth, sigv2, sigv4, store, synth
 from backlot.openapi import qp
 
 router = APIRouter(prefix="/s3", tags=["s3"])
@@ -471,6 +472,59 @@ _CONFIGURATION_LISTS = {
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _etag_matches(sent: list[str], etag: str) -> bool:
+    """Whether the values of an `If-Match` or an `If-None-Match`, every line of it, name an object
+    whose unquoted ETag is ``etag``, as real S3 matched them (us-east-1, 2026-10-13): split at each
+    `"`, `,`, space and tab, they match where a piece is the ETag, case and all, or `*`. So
+    `W/"<etag>"`, `w/"<etag>"`, `"*"`, `"0000" "<etag>"` and `"0000";"<etag>"` match, where
+    `W/<etag>`, `W/*`, `'<etag>'`, `"0000";<etag>` and an empty value do not."""
+    pieces = re.split(r'[", \t]+', ",".join(sent))
+    return etag in pieces or "*" in pieces
+
+
+def _http_date(value: str) -> datetime | None:
+    """A condition's date as real S3 read an `If-Modified-Since` and an `If-Unmodified-Since`
+    (us-east-1, 2026-10-13), or ``None`` where it read none and left the condition out: as
+    ``sigv2.parse_date`` reads a `Date`, except that the ISO 8601 basic form an `x-amz-date` takes
+    is no date here, and neither is a year past 9999, which a `Date` is a 500 for."""
+    if value[:1].isdigit():
+        return None
+    try:
+        return sigv2.parse_date(value)
+    except sigv2.DateOutOfRange:
+        return None
+
+
+def _precondition(request, etag: str, last_modified: datetime):
+    """Return ("412", condition_name), ("304", None) or None. Order follows RFC 9110 section
+    13.2.2, which matches the measured rows (us-east-1, 2026-10-11 to 2026-10-13). Every line of an
+    ETag condition is read, and the first line of a date."""
+    h = request.headers
+    if_match = h.getlist("if-match")
+    if if_match:
+        if not _etag_matches(if_match, etag):
+            return ("412", "If-Match")
+    else:
+        since = h.get("if-unmodified-since")
+        if since is not None:
+            d = _http_date(since)
+            if d is not None and last_modified > d:
+                return ("412", "If-Unmodified-Since")
+
+    none_match = h.getlist("if-none-match")
+    if none_match:
+        if _etag_matches(none_match, etag):
+            return ("304", None)
+    else:
+        since = h.get("if-modified-since")
+        if since is not None:
+            d = _http_date(since)
+            now = datetime.now(timezone.utc)
+            if d is not None and d <= now and last_modified <= d:
+                return ("304", None)
+    return None
 
 
 def _xml(
@@ -1760,6 +1814,68 @@ def _configuration_list(q, selector: str) -> Response:
     )
 
 
+# The query parameters an object's GET and HEAD set a response header with, and the header each one
+# sets, on the 200 and the 206 and not on a sub-resource's answer or a refusal (real S3, us-east-1,
+# measured 2026-10-11). The bytes, the ETag and the length stay the object's. A 304 carries each
+# header but `Content-Type` (2026-10-13).
+_RESPONSE_HEADERS = {
+    "response-content-type": "Content-Type",
+    "response-content-language": "Content-Language",
+    "response-expires": "Expires",
+    "response-cache-control": "Cache-Control",
+    "response-content-disposition": "Content-Disposition",
+    "response-content-encoding": "Content-Encoding",
+}
+# What an override's value carries in place of a control character: a space, for each one below
+# U+0020 but the tab, and for U+007F (measured 2026-10-13).
+_SPACED_CONTROLS = {c: " " for c in (*range(0x09), *range(0x0A, 0x20), 0x7F)}
+
+
+def _response_override_refusal(q) -> Response | None:
+    """Real's 400 for an override whose value no header can carry, or ``None``.
+
+    Each name is read from its first value, as ``_response_overrides`` reads it. A value holding a
+    character past U+00FF is refused, a percent-encoded byte that is not UTF-8 among them, and so is
+    one holding a `"` that opens a quoted span it does not close, where a backslash escapes the
+    character after it inside the quotes or out: `a"b` and `"a\\"` are refused, `"a"b` and `a\\"b`
+    are not. Real S3 refused both ahead of a bucket or a key that does not exist, a `versionId`, a
+    `partNumber`, a `Range`, a checksum mode, a condition's 304 or 412, a sub-resource's answer and
+    an unsigned request's 400, and ahead of the credential in 30 of 32 requests whose signature or
+    key it refused (us-east-1, 2026-10-13).
+    """
+    for name in _RESPONSE_HEADERS:
+        value = _first(q, name, None)
+        if value is None:
+            continue
+        if any(ord(ch) > 0xFF for ch in value):
+            return _argument_error(
+                "Header value cannot be represented using ISO-8859-1.", name, value
+            )
+        quoted = escaped = False
+        for ch in value:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quoted = not quoted
+        if quoted:
+            return _argument_error("Header value contained an open quoted span.", name, value)
+    return None
+
+
+def _response_overrides(q) -> dict[str, str]:
+    """The headers the `response-*` overrides set, once ``_response_override_refusal`` has passed
+    them: each name matched as written and read from its first value, so
+    `?response-content-type=a/b&response-content-type=c/d` sets `a/b` (measured 2026-10-13), with
+    the control characters ``_SPACED_CONTROLS`` names as spaces."""
+    return {
+        header: value.translate(_SPACED_CONTROLS)
+        for name, header in _RESPONSE_HEADERS.items()
+        if (value := _first(q, name, None)) is not None
+    }
+
+
 @router.api_route("/{bucket}/{key:path}", methods=["GET", "HEAD"])
 async def object_get(request: Request, bucket: str, key: str):
     """GetObject — the object's bytes, or its metadata headers alone for a HEAD.
@@ -1778,6 +1894,9 @@ async def object_get(request: Request, bucket: str, key: str):
     pair refused the version first (all measured 2026-09-30)."""
     head = request.method == "HEAD"
     q = request.query_params
+    refused = _response_override_refusal(q)
+    if refused is not None:
+        return _head(400) if head else refused
     selected = _key_selected(q)
     if selected == ["uploadId"] and "partNumber" in q:
         # UploadPart, which real refuses a GET and a HEAD of with the 405 naming `PART`, before the
@@ -1804,6 +1923,23 @@ async def object_get(request: Request, bucket: str, key: str):
     caller, visible, err = _auth(request)
     if err:
         return err
+    # An unsigned GET or HEAD of an object with an override is real's 400, naming no bucket or key,
+    # on a key the bucket holds and on one it does not, with no version or the null one; beside a
+    # sub-resource or another version it is not (us-east-1, 2026-10-13). Real answers a bucket
+    # nobody has with `NoSuchBucket`; here every name gets the 400, so the answer does not tell an
+    # anonymous caller which names the corpus holds (``_auth``).
+    if (
+        not selected
+        and caller.is_anonymous
+        and any(name in q for name in _RESPONSE_HEADERS)
+        and _first(q, "versionId", None) in (None, "null")
+    ):
+        if head:
+            return _head(400)
+        return _error(
+            "InvalidRequest",
+            "Request specific response headers cannot be used for anonymous GET requests.",
+        )
     conn = auth.conn(request)
     if not _bucket_visible(conn, bucket, visible):
         return _head(404) if head else _no_such_bucket(bucket)
@@ -1875,6 +2011,35 @@ async def object_get(request: Request, bucket: str, key: str):
 
     data = row["content"].encode("utf-8")
     total = len(data)
+    ts = row["updated_ts"] or row["created_ts"]
+    etag = synth.s3_etag(row["key"], row["content"])
+    last_modified = synth.s3_http_date(ts)
+
+    # Conditional headers. Real S3 (us-east-1, 2026-10-11 and 2026-10-12) answers the 304 and the
+    # 412 after a key's sub-resources, which read no condition, and ahead of the part-number refusal
+    # and the Range parse, GET and HEAD alike, but a bad checksum mode is refused ahead of both.
+    verdict = _precondition(request, etag.strip('"'), _http_date(last_modified))
+    if verdict is not None:
+        if _checksum_mode(request) is None:
+            return _head(400) if head else _error("InvalidRequest", _BAD_CHECKSUM_MODE)
+        kind, condition = verdict
+        if kind == "304":
+            # ETag, Last-Modified and the overrides `_RESPONSE_HEADERS` puts on a 304; the
+            # request-id pair comes from the /s3 middleware.
+            carried = _response_overrides(q)
+            carried.pop("Content-Type", None)
+            return Response(
+                status_code=304,
+                headers={"ETag": etag, "Last-Modified": last_modified, **carried},
+            )
+        if head:
+            return _head(412)
+        return _error(
+            "PreconditionFailed",
+            "At least one of the pre-conditions you specified did not hold",
+            f"<Condition>{condition}</Condition>",
+        )
+
     if number is not None and number > 1:
         # Every object here is one part. The part is named as parsed, `02` as `2` (2026-09-29).
         if head:
@@ -1885,10 +2050,9 @@ async def object_get(request: Request, bucket: str, key: str):
             f"<PartNumberRequested>{number}</PartNumberRequested>"
             "<ActualPartCount>1</ActualPartCount>",
         )
-    ts = row["updated_ts"] or row["created_ts"]
     headers = {
-        "ETag": synth.s3_etag(row["key"], row["content"]),
-        "Last-Modified": synth.s3_http_date(ts),
+        "ETag": etag,
+        "Last-Modified": last_modified,
         "Accept-Ranges": "bytes",
         # SSE-S3, the default `_ANSWERED["encryption"]` declares, which real names on an object's
         # own 200 and 206, GET and HEAD alike (measured in us-east-1 on 2026-10-11).
@@ -1932,6 +2096,7 @@ async def object_get(request: Request, bucket: str, key: str):
 
     length = end - start + 1
     headers["Content-Length"] = str(length)
+    headers.update(_response_overrides(q))
     if head:
         return Response(status_code=status, headers=headers)
     return Response(content=data[start : end + 1], status_code=status, headers=headers)
@@ -2900,6 +3065,9 @@ _VERSION_AFTER_THE_BUCKET = frozenset({("PUT", "acl"), ("POST", "restore")})
 
 @router.api_route(
     "/{bucket}", methods=["PUT", "POST", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False
+)
+@router.api_route(
+    "/{bucket}/", methods=["PUT", "POST", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False
 )
 async def bucket_method_refusal(request: Request, bucket: str) -> Response:
     """Without a selector, `PUT` creates the bucket on real, `DELETE` removes it and `POST` is a

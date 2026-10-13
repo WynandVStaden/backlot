@@ -886,7 +886,9 @@ class _Ordering(NamedTuple):
 #: pull seen through this listing, its review comments: 5797 (`comments: 105`, `review_comments:
 #: 25`) sits between 2966 (211) and 1573 (122), which no single member orders. Ties keep the
 #: unsent order whatever the direction: `sort=comments&direction=asc` answers 7620, 7619, 7618,
-#: three rows at 0 comments, newest first.
+#: three rows at 0 comments, newest first, and on 2026-10-13 `labels=Bug&state=all&sort=updated`
+#: answered 1703 before 1642, 1755 before 1746 and 1029 before 639, each pair sharing one
+#: `updated_at`, with `direction=asc` and with `direction=desc`.
 _ISSUE_ORDERING = _Ordering(
     sorts=("created", "updated", "comments"),
     default="created",
@@ -907,7 +909,11 @@ _ISSUE_ORDERING = _Ordering(
 #: here. `direction=asc` alone 4, 8, 10. `sort=bogus` 4, 8, 10 and `sort=bogus&direction=desc`
 #: 7619, 7616, 7609, so an unknown sort is read as `created` with the direction honoured;
 #: `direction=bogus` alone the unsent order and `sort=updated&direction=bogus` 7025, 7026, 6675,
-#: the `direction=desc` order, so an unknown direction is `desc` with the sort kept.
+#: the `direction=desc` order, so an unknown direction is `desc` with the sort kept. Pulls that
+#: share an `updated_at` are ordered by number in the direction asked: on 2026-10-13, with
+#: `state=all&per_page=100`, the first page of `sort=updated` held 27 such groups, each lowest
+#: number first (192 before 196), and that of `sort=updated&direction=desc` 4, each highest number
+#: first (7543 before 7520).
 _PULL_ORDERING = _Ordering(
     sorts=("created", "updated", "popularity", "long-running"),
     default="created",
@@ -1009,15 +1015,20 @@ def _updated_ts(row) -> int:
     return row["updated_ts"] or _created_ts(row) + 3600
 
 
-def _issue_sort_keys(conn, repo: str, sort: str, ids) -> dict[str, Callable]:
+def _issue_sort_keys(
+    conn, repo: str, sort: str, ids, *, updated_keeps_unsent: bool = False
+) -> dict[str, Callable]:
     """The sort keys of the issue and pull listings, over the store's rows.
 
-    The timestamps are the ones the bodies serve (:func:`_shared_obj` reads the same two
-    functions), and the number breaks a tie the way real's monotonic ids do. `comments` and
-    `popularity` are one key: both order by the conversation and review comments added together,
-    which is the count real orders by (see :data:`_ISSUE_ORDERING`), read in one query for the
-    repository and only when asked for. `long-running` is `created` with no filter (see
-    :data:`_PULL_ORDERING`).
+    The timestamps are the ones the bodies serve (:func:`_shared_obj` reads the same two functions).
+    `created` breaks a same-second tie by number, and so does `updated` on the pull listing, so that
+    number reverses with the direction (see :data:`_PULL_ORDERING`). The issue listing passes
+    ``updated_keeps_unsent``, which makes `updated` the timestamp alone, so rows that share an
+    `updated_at` keep the unsent order, newest first, in either direction (see
+    :data:`_ISSUE_ORDERING`). `comments` and `popularity` are one key: both order by the
+    conversation and review comments added together, which is the count real orders by (see
+    :data:`_ISSUE_ORDERING`), read in one query for the repository and only when asked for.
+    `long-running` is `created` with no filter (see :data:`_PULL_ORDERING`).
 
     ``ids`` scopes that count to the comments the caller is served, so a row's position is the
     position its own served numbers put it in (see :func:`store.github_comment_counts`)."""
@@ -1029,7 +1040,10 @@ def _issue_sort_keys(conn, repo: str, sort: str, ids) -> dict[str, Callable]:
         return _created_ts(row), row["number"]
 
     def updated(row):
-        return _updated_ts(row), row["number"]
+        ts = _updated_ts(row)
+        if updated_keeps_unsent:
+            return ts
+        return ts, row["number"]
 
     def comments(row):
         return counts.get(row["number"], 0)
@@ -1890,6 +1904,9 @@ async def list_issues(
     state: str = _state_param(_ISSUE_STATE_DESCRIPTION),
     sort: str = _enum_param("created", _ISSUE_SORT_DESCRIPTION, _ISSUE_ORDERING.sorts),
     direction: str = _enum_param("desc", _ISSUE_DIRECTION_DESCRIPTION, _DIRECTIONS),
+    labels: str = Query(
+        None, description="A list of comma separated label names. Example: `bug,ui,@high`"
+    ),
     page: PageParam = None,
     per_page: PageParam = None,
 ):
@@ -1917,9 +1934,29 @@ async def list_issues(
         for r in store.list_documents(conn, "github", repo, ids, limit=10_000, state=state_filter)
         if r["kind"] != "file"
     ]
+    # Measured on psf/requests, api.github.com, 2026-10-12 and 2026-10-13: an issue is served when
+    # its labels include every name the value lists, comma-separated and compared without case, and
+    # the last repeated parameter is the one read and the one a page link carries. A space is part
+    # of a name (`%20Bug` and `Bug%20` match nothing) and an empty name between two others is a name
+    # too (`Bug,,Documentation` matches nothing), but empty names at the end are dropped
+    # (`Bug,` is `Bug`). A value of commas alone (`,`) or of whitespace alone (`%20`, `%09`,
+    # `%C2%A0`, `%E3%80%80`) filters nothing; `%1C` to `%1F`, which `str.isspace` counts too, match
+    # nothing.
+    named = (labels or "").rstrip(",")
+    if named and not all(ch.isspace() and not 0x1C <= ord(ch) <= 0x1F for ch in labels):
+        wanted = {name.lower() for name in named.split(",")}
+        all_rows = [
+            row
+            for row in all_rows
+            if wanted <= {name.lower() for name in store.jcol(row, "labels")}
+        ]
     sort, descending = _order(request, _ISSUE_ORDERING)
     all_rows = _ordered(
-        all_rows, _issue_sort_keys(conn, repo, sort, ids), _ISSUE_ORDERING, sort, descending
+        all_rows,
+        _issue_sort_keys(conn, repo, sort, ids, updated_keeps_unsent=True),
+        _ISSUE_ORDERING,
+        sort,
+        descending,
     )
     asserted = page  # kept: the page urls carry the number the caller claimed, or none at all
     page, per_page = _clamp(page, per_page)
@@ -1940,7 +1977,7 @@ async def list_issues(
     return _paged_by_cursor(
         request,
         len(all_rows),
-        _echo(request, state=state, **_sent(request, "sort", "direction")),
+        _echo(request, state=state, **_sent(request, "sort", "direction", "labels")),
         body,
         link_page,
         per_page,
