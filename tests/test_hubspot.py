@@ -1096,6 +1096,10 @@ _TOKEN_ROWS = [
     _nt("escaped-char-before", "search", '{"query":"\\u00e9","limit":NaN}', _token_refusal(30, "NaN")),
     _nt("spelled-in-a-string-before", "search", '{"query":"a\\"NaN","limit":NaN}', _token_refusal(30, "NaN")),
     _nt("repeated-key", "search", '{"limit":5,"limit":NaN}', _token_refusal(23, "NaN")),
+    # UTF-16, and a byte that does not decode behind the token: the text ahead of it is scanned
+    _nt("utf-16", "search", '{"limit":NaN}'.encode("utf-16-be"), _token_refusal(13, "NaN")),
+    _nt("a-byte-that-does-not-decode-behind", "search", b'{"limit":NaN,"query":"\xff"}', _token_refusal(13, "NaN")),
+    _nt("a-byte-order-mark-and-a-byte-that-does-not-decode", "batch/read", b'\xef\xbb\xbf{\n"inputs":[NaN,"\xff"]}', _token_refusal(14, "NaN", line=2)),
     # the token and a value real refuses for its type: whichever starts first is named
     _nt("inputs-ahead", "batch/read", '{"inputs":"x","properties":NaN}', _batch_refusal(11, _not_a_list("String", "VALUE_STRING"))),
     _nt("inputs-behind", "batch/read", '{"properties":NaN,"inputs":"x"}', _token_refusal(18, "NaN")),
@@ -1138,7 +1142,8 @@ def test_hubspot_refuses_a_non_standard_number_token(
     real reads as text (a 207 for batch/read because no company has those ids)."""
     headers = {"Content-Type": "application/json", **(admin_h if authed else {})}
     url = f"/hubspot/crm/v3/objects/{object_type}/{route}"
-    r = client.post(url, headers=headers, content=raw.encode())
+    content = raw if isinstance(raw, bytes) else raw.encode()
+    r = client.post(url, headers=headers, content=content)
     if isinstance(want, dict):
         assert (r.status_code, r.json()) == (400, want)
     else:

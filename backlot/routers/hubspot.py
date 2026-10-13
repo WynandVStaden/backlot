@@ -605,9 +605,16 @@ def _non_standard_number(raw: bytes) -> tuple[tuple[int, int], JSONResponse] | t
     reads the body in order and stops at the first value it cannot read, so a value
     `_refuse_a_batch_read_shape` or `_refuse_an_operator` refuses is named instead when it starts
     ahead of the token (`{"inputs":[5,NaN]}` names the `5`, `{"inputs":[NaN,5]}` the token); both
-    take the token's start as `before`. `json.loads` reads the three as floats, so without this the
-    routes answer for a float there."""
-    text = raw.decode(json.detect_encoding(raw), "surrogatepass")
+    take the token's start as `before`. A byte that does not decode in the body's encoding stops
+    real too, with a 400 of its own that this router does not send, so only the text ahead of the
+    first such byte is scanned: a token there is named, and a body with none is left to the route.
+    `json.loads` reads the three as floats, so without this the routes answer for a float there."""
+    encoding = json.detect_encoding(raw)
+    try:
+        text = raw.decode(encoding, "surrogatepass")
+    except UnicodeDecodeError as e:
+        # `e.start` counts from past a UTF-8 byte-order mark, as `e.object` does and `raw` does not
+        text = e.object[: e.start].decode(encoding, "surrogatepass")
     for found in _NON_STANDARD_NUMBER.finditer(text):
         token = found[0]
         if token.startswith('"'):
