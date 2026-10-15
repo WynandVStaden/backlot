@@ -2736,6 +2736,9 @@ async def docs_get(document_id: str, request: Request):
         "title": row["title"],
         "revisionId": synth._digest(document_id)[:24],
         "suggestionsViewMode": "SUGGESTIONS_INLINE",
+        # Real serves this on every document read, whatever `suggestionsViewMode` was asked for
+        # and with or without `includeTabsContent` (measured 2026-10-09).
+        "commentsViewMode": "COMMENTS_VIEW_MODE_OMITTED",
         "body": {"content": content},
         "documentStyle": {},
         "namedStyles": {"styles": []},

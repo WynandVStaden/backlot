@@ -4593,6 +4593,19 @@ def test_docs_get_returns_paragraph_text(base, admin_h):
     assert "Logo usage" in text  # SAMPLE "Brand guidelines v3"
 
 
+@pytest.mark.parametrize(
+    "params",
+    [{}, {"suggestionsViewMode": "PREVIEW_WITHOUT_SUGGESTIONS"}, {"includeTabsContent": "true"}],
+    ids=["plain", "preview-without-suggestions", "tabs-content"],
+)
+def test_docs_get_serves_comments_view_mode(base, admin_h, params):
+    """A document read carries `commentsViewMode`, with the value real serves."""
+    fid, _ = _drive_by_mime(base, admin_h, "application/vnd.google-apps.document")
+    r = httpx.get(f"{base}/docs/v1/documents/{fid}", headers=admin_h, params=params)
+    assert r.status_code == 200
+    assert r.json()["commentsViewMode"] == "COMMENTS_VIEW_MODE_OMITTED"
+
+
 def test_sheets_get_withholds_grid_data_by_default(base, admin_h):
     """Measured: a plain `spreadsheets.get` returns `sheets[i].properties` and NO `data` — on a real
     workbook that is 4 KB against 5.7 MB with `includeGridData=true`. Volunteering the full grid on
