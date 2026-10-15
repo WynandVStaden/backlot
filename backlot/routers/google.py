@@ -597,18 +597,24 @@ _GMAIL_KEYS = {
     "has",
     "newer_than",
     "older_than",
+    "newer",
+    "older",
 }
+# Real reads newer: as after: and older: as before: (measured 2026-10-09: the same counts on a
+# 565-message mailbox), so each is folded into the operator it is another name for.
+_GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
 
 
 def _parse_gmail_q(q: str) -> tuple[str, dict]:
     """Split a Gmail search `q` into (free_text, operators). Honors from:/to:/subject:/
-    after:/before:/newer_than:/older_than:/label:/in:/has: — the rest is free text matched
+    after:/before:/newer:/older:/newer_than:/older_than:/label:/in:/has: — the rest is free text matched
     full-text."""
     ops: dict[str, list[str]] = {}
 
     def _take(m):
         key = m.group(1).lower()
         if key in _GMAIL_KEYS:
+            key = _GMAIL_KEY_ALIASES.get(key, key)
             ops.setdefault(key, []).append(m.group(2).strip('"'))
             return " "
         return m.group(0)
