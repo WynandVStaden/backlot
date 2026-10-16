@@ -314,10 +314,9 @@ def test_gmail_newer_older_are_after_before(db):
     assert len(_gmail_query(db, None, None, "newer:1970/01/02")) == total
 
 
-def test_gmail_plus_ends_a_from_to_or_cc_value():
-    """A `+` inside a `from:`, `to:` or `cc:` value ends it, and what follows is a search term of
-    its own; a value ending in `+` matches nothing; a `+` leading a value or standing alone is
-    ignored."""
+def test_gmail_plus_ends_an_address_or_subject_value():
+    """How `_parse_gmail_q` reads a `+` in an operator's value and in free text, row by row as the
+    comment on `_GMAIL_PLUS_ENDS` records it."""
     from backlot.routers.google import _GMAIL_NOTHING, _parse_gmail_q
 
     assert _parse_gmail_q("cc:lena+update") == ("+update", {"cc": ["lena"]})
@@ -328,10 +327,17 @@ def test_gmail_plus_ends_a_from_to_or_cc_value():
     assert _parse_gmail_q("+") == ("", {})
     for q in ("cc:lena+", "cc:lena++", "cc:lena+ the", "from:bob+   to:ava+"):
         assert _GMAIL_NOTHING in _parse_gmail_q(q)[1], q
-    # Not measured, so unchanged: `bcc:` and `subject:` keep a `+`, and so does a quoted value.
-    assert _parse_gmail_q("bcc:lena+news") == ("", {"bcc": ["lena+news"]})
-    assert _parse_gmail_q("subject:c+") == ("", {"subject": ["c+"]})
+    assert _parse_gmail_q("bcc:lena+news") == ("+news", {"bcc": ["lena"]})
+    assert _parse_gmail_q("subject:plan+rollout") == ("+rollout", {"subject": ["plan"]})
+    for q in ("bcc:lena+", "subject:c+", "update+", "+update+"):
+        assert _GMAIL_NOTHING in _parse_gmail_q(q)[1], q
+    assert _parse_gmail_q("cc:lena@acme.com+x") == ("", {"cc": ["lena@acme.com+x"]})
+    assert _parse_gmail_q("from:lena+news@acme.com") == ("", {"from": ["lena+news@acme.com"]})
+    assert _parse_gmail_q("cc:lena@acme.com++") == ("", {"cc": ["lena@acme.com"]})
+    assert _parse_gmail_q("cc:@acme.com+x") == ("+x", {"cc": ["@acme.com"]})
+    # A quoted value keeps its `+`, and so does `label:`.
     assert _parse_gmail_q('cc:"lena+x"') == ("", {"cc": ["lena+x"]})
+    assert _parse_gmail_q("label:inbox+x") == ("", {"label": ["inbox+x"]})
 
 
 def test_gmail_plus_over_the_wire(tmp_path):
@@ -374,6 +380,8 @@ def test_gmail_plus_over_the_wire(tmp_path):
         assert count("from:bob+update") == count("from:bob +update") == 1
         assert count("cc:lena+") == count("cc:lena++") == count("cc:lena+ the") == 0
         assert count("cc:+lena") == count("cc:lena +") == 2
+        assert count("cc:lena@acme.com+update") == count("update+") == 0
+        assert count("cc:lena@acme.com+") == 2
 
 
 def test_github_search_q_parse():

@@ -664,9 +664,15 @@ _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
 # `cc:<local>+<word>`, `from:<local>+update` and `to:<local>+update` answered the ids of the
 # operator with `+<word>` sent as a search term of its own; `cc:<local>+`, `cc:<local>++` and
 # `from:<local>+   to:<local>+` answered nothing; `cc:+<local>` answered as `cc:<local>` does,
-# `+` alone with every message, and `cc:<local> +` as `cc:<local>`.
-# `bcc:` and `subject:` were not measured, so their values keep a `+`.
-_GMAIL_PLUS_ENDS = {"from", "to", "cc"}
+# `+` alone with every message, and `cc:<local> +` as `cc:<local>`. On 2026-10-16, `bcc:` and
+# `subject:` answered alike (`subject:backlot+probe` as `subject:backlot +probe`, `bcc:<local>+`
+# and `subject:backlot+` nothing, `bcc:+<local>` as `bcc:<local>`), and so did a word outside an
+# operator (`+update` as `update`, `update+` and `+update+` nothing). A value with a character
+# before an `@` keeps what follows a `+`: `from:<address>+x`, `cc:<address>+x` and
+# `from:<local>@+x` answered nothing and `from:<local>+<tag>@<domain>` that address's messages,
+# while `from:<address>+` and `from:<address>++` answered as `from:<address>` and `from:@<domain>+x`
+# as `from:@<domain> +x`. `label:`, `in:` and `has:` keep a `+` (`label:inbox+x` answered nothing).
+_GMAIL_PLUS_ENDS = {"from", "to", "cc", "bcc", "subject"}
 # The `ops` key of a value that ends in `+`: real answers such a search with nothing. No operator
 # can be named this, since `_GMAIL_OP` reads a name of at least one word character.
 _GMAIL_NOTHING = ""
@@ -684,21 +690,29 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
             key = _GMAIL_KEY_ALIASES.get(key, key)
             value = m.group(2)
             if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
-                value, plus, term = value.lstrip("+").partition("+")
-                if plus and not term.strip("+"):
-                    ops.setdefault(_GMAIL_NOTHING, []).append(value)
-                    return " "
-                if plus:
-                    ops.setdefault(key, []).append(value)
-                    return f" +{term} "
+                value = value.lstrip("+")
+                if re.search(r"[^@]@", value):
+                    value = value.rstrip("+")
+                else:
+                    value, plus, term = value.partition("+")
+                    if plus and not term.strip("+"):
+                        ops.setdefault(_GMAIL_NOTHING, []).append(value)
+                        return " "
+                    if plus:
+                        ops.setdefault(key, []).append(value)
+                        return f" +{term} "
             ops.setdefault(key, []).append(value.strip('"'))
             return " "
         return m.group(0)
 
     free = re.sub(r"\s+", " ", _GMAIL_OP.sub(_take, q)).strip()
-    # A `+` standing alone is no search term (the measurement at `_GMAIL_PLUS_ENDS`).
+    # A `+` standing alone is no search term, and a word ending in one matches nothing (the
+    # measurement at `_GMAIL_PLUS_ENDS`).
     if not (len(free) >= 2 and free[0] == free[-1] == '"'):
-        free = " ".join(t for t in free.split(" ") if t != "+")
+        words = [t for t in free.split(" ") if t != "+"]
+        if any(t.endswith("+") for t in words):
+            ops.setdefault(_GMAIL_NOTHING, []).append(free)
+        free = " ".join(words)
     return free, ops
 
 
