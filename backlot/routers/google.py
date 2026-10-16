@@ -2824,12 +2824,14 @@ async def docs_get(document_id: str, request: Request):
         "title": row["title"],
         "revisionId": synth._digest(document_id)[:24],
         "suggestionsViewMode": "SUGGESTIONS_INLINE",
-        # Real serves this on every document read, whatever `suggestionsViewMode` was asked for
-        # and with or without `includeTabsContent` (measured 2026-10-09).
-        "commentsViewMode": "COMMENTS_VIEW_MODE_OMITTED",
         "body": {"content": content},
         "documentStyle": {},
         "namedStyles": {"styles": []},
+        # Last, where real serves it. Real's value for a read that asks for no comments, whatever
+        # `suggestionsViewMode` and `includeTabsContent` select (measured 2026-10-09 and
+        # 2026-10-15); `commentsViewMode=COMMENTS_VIEW_MODE_INCLUDED` beside the tabs and inline
+        # suggestions is answered `COMMENTS_VIEW_MODE_INCLUDED` there and this value here.
+        "commentsViewMode": "COMMENTS_VIEW_MODE_OMITTED",
     }
 
 
