@@ -296,13 +296,14 @@ def test_gmail_relative_date_query_not_zeroed(db):
 
 
 def test_gmail_newer_older_are_after_before(db):
-    """Real reads `newer:` as `after:` and `older:` as `before:`, so each answers the same set, and
-    neither is left in the free text where it would match nothing."""
+    """The cases the comment on `_GMAIL_KEY_ALIASES` measures, with a value and empty."""
     from backlot.routers.google import _gmail_query, _parse_gmail_q
 
     free, ops = _parse_gmail_q("quarterly newer:2026/03/02 older:2026/03/04")
     assert free == "quarterly"
     assert ops == {"after": ["2026/03/02"], "before": ["2026/03/04"]}
+    assert _parse_gmail_q("newer:") == ("newer:", {})
+    assert _parse_gmail_q("older:") == ("older:", {})
     total = len(_gmail_query(db, None, None, ""))
     for alias, op in (("newer", "after"), ("older", "before")):
         for day in ("1970/01/02", "2999/01/01"):

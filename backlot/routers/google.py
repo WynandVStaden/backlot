@@ -602,8 +602,11 @@ _GMAIL_KEYS = {
     "newer",
     "older",
 }
-# Real reads newer: as after: and older: as before: (measured 2026-10-09: the same counts on a
-# 565-message mailbox), so each is folded into the operator it is another name for.
+# Real reads `newer:` as `after:` and `older:` as `before:`, so each is folded into the operator
+# it is another name for. Measured on a Workspace mailbox on 2026-10-15: messages.list and
+# threads.list answered `newer:X` with the ids `after:X` answers, and `older:X` with those of
+# `before:X`, for each value X tried, read as a date or not. An empty `newer:` is the search term
+# `newer`, as an empty `after:` is `after`, and `_GMAIL_OP` leaves both in the free text.
 _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
 
 
