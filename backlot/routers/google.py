@@ -660,6 +660,8 @@ _GMAIL_KEYS = {
 # `before:X`, for each value X tried, read as a date or not. An empty `newer:` is the search term
 # `newer`, as an empty `after:` is `after`, and `_GMAIL_OP` leaves both in the free text.
 _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
+
+
 # The operators whose value a `+` ends. Measured on a Workspace mailbox on 2026-10-15:
 # `cc:<local>+<word>`, `from:<local>+update` and `to:<local>+update` answered the ids of the
 # operator with `+<word>` sent as a search term of its own; `cc:<local>+`, `cc:<local>++` and
@@ -688,20 +690,7 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         key = m.group(1).lower()
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
-            value = m.group(2)
-            if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
-                value = value.lstrip("+")
-                if re.search(r"[^@]@", value):
-                    value = value.rstrip("+")
-                else:
-                    value, plus, term = value.partition("+")
-                    if plus and not term.strip("+"):
-                        ops.setdefault(_GMAIL_NOTHING, []).append(value)
-                        return " "
-                    if plus:
-                        ops.setdefault(key, []).append(value)
-                        return f" +{term} "
-            ops.setdefault(key, []).append(value.strip('"'))
+            ops.setdefault(key, []).append(m.group(2).strip('"'))
             return " "
         return m.group(0)
 
