@@ -672,8 +672,6 @@ _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
 # nothing where `has:attachment` and `newer_than:7d` answered 160 and 36 messages, so `_GMAIL_OP`
 # reads across whitespace for these four alone.
 _GMAIL_ADDRESS_KEYS = {"from", "to", "cc", "bcc"}
-
-
 # The operators whose value a `+` ends. Measured on a Workspace mailbox on 2026-10-15:
 # `cc:<local>+<word>`, `from:<local>+update` and `to:<local>+update` answered the ids of the
 # operator with `+<word>` sent as a search term of its own; `cc:<local>+`, `cc:<local>++` and
@@ -702,10 +700,22 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         key = m.group(1).lower()
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
-            raw = m.group(2)
-            if not raw and key not in _GMAIL_ADDRESS_KEYS:
+            value = m.group(2)
+            if not value and key not in _GMAIL_ADDRESS_KEYS:
                 return m.group(0)
-            ops.setdefault(key, []).append(raw.strip('"'))
+            if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
+                value = value.lstrip("+")
+                if re.search(r"[^@]@", value):
+                    value = value.rstrip("+")
+                else:
+                    value, plus, term = value.partition("+")
+                    if plus and not term.strip("+"):
+                        ops.setdefault(_GMAIL_NOTHING, []).append(value)
+                        return " "
+                    if plus:
+                        ops.setdefault(key, []).append(value)
+                        return f" +{term} "
+            ops.setdefault(key, []).append(value.strip('"'))
             return " "
         return m.group(0)
 
