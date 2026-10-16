@@ -330,8 +330,8 @@ def test_hubspot_an_object_type_id_is_a_spelling_of_its_type(client, admin_h, as
 
 
 def test_hubspot_0_18_0_72_0_64_are_their_types(tmp_path):
-    """`0-18`, `0-72` and `0-64` are communications, deal splits and quote templates: real serves
-    each id what the name serves, and refuses `archived=true` on it with the name's message."""
+    """The three pairings the comment above `_TYPE_IDS` records, over a corpus holding one quote
+    template."""
     from tests._helpers import client_for
 
     records = [
@@ -375,6 +375,9 @@ def test_hubspot_0_18_0_72_0_64_are_their_types(tmp_path):
         )
         assert read.status_code == 200
         assert [r["id"] for r in read.json()["results"]] == [rid]
+        for to in ("contacts", "0-18"):
+            linked = c.get(f"/hubspot/crm/v4/objects/0-64/{rid}/associations/{to}", headers=h)
+            assert (linked.status_code, linked.json()) == (200, {"results": []}), to
 
 
 def test_hubspot_one_type_stated_both_ways_is_one_type(tmp_path):

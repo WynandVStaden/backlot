@@ -352,10 +352,11 @@ _PLURAL = {plural: singular for singular, plural in _SINGULAR.items()}
 # Backlot cannot verify is a name it would be inventing; an unmapped id stays a 400 rather than
 # resolving to a guess.
 #
-# Three more are mapped from real's own answers rather than from that list (measured 2026-10-09):
-# `0-18`, `0-72` and `0-64` serve the same records as `communications`, `deal_splits` and
-# `quote_templates` on the listing, and `0-64` on a record, search and batch/read too, and
-# `archived=true` on each id is the refusal its name gets, naming the same id.
+# Three more are mapped from real's own answers rather than from that list (measured 2026-10-09
+# and 2026-10-15): `0-18`, `0-72` and `0-64` serve the same records as `communications`,
+# `deal_splits` and `quote_templates` on the listing, and `0-64` on a record, search and batch/read
+# too; `archived=true` on each id is the refusal its name gets, naming the same id; and the v4
+# associations route reads each id on either side as it reads the name.
 #
 # A custom object is a `2-<n>`, and its records are addressed here by the name the corpus gave it.
 # HubSpot's own alias for one is `p_<name>` (or the fully qualified `p<portalId>_<name>`), but both
