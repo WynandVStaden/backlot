@@ -821,9 +821,20 @@ async def users_list(request: Request):
     limit, err = _limit(request)
     if err is not None:
         return err
-    if limit < -1:  # see `_limit`
-        return _err("fatal_error")
-    limit = max(limit, 0)  # `-1` serves no members and a cursor to them
+    if limit < 0:  # see `_limit`
+        sent = _param(request, "cursor")
+        if decode_cursor_or_none(sent) is None:
+            return _err("invalid_cursor")
+        if limit < -1:
+            return _err("fatal_error")
+        if sent:
+            return _err("internal_error")
+        total = len(store.all_user_emails(conn))
+        return {
+            "ok": True,
+            "members": [],
+            "response_metadata": {"next_cursor": next_cursor(0, 1, total)},
+        }
     # The roster is the registered user principals — the employee directory plus internal mail/doc
     # authors. Slack transcript speakers are NOT added, and that is a limitation of the upstream
     # dataset rather than a modelling choice, so it is stated plainly here and in the README.
@@ -1425,7 +1436,10 @@ def _limit(request: Request) -> tuple[int, JSONResponse | None]:
     2026-10-12, one workspace of 21 members and 8 public channels, `-1` to `-1e19`):
     `conversations.list` and `conversations.members` serve every item, as for no `limit`;
     `conversations.history` serves one message; `users.list` serves no members and a cursor for
-    `-1`, and answers `fatal_error` for anything lower."""
+    `-1`, and answers `fatal_error` for anything lower. On `users.list`, measured 2026-10-16 on the
+    same workspace, the cursor `-1` serves goes on from the second member, as the one `limit=1`
+    serves does; `-1` beside a cursor that decodes is `internal_error`; and a cursor that does not
+    decode is `invalid_cursor` ahead of the other two (`cursor=bogus&limit=-2`)."""
     default = get_settings().default_page_size
     values, err = _numbers(request, ("limit", default))
     return values["limit"] or default, err
