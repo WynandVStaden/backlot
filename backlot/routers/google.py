@@ -636,7 +636,10 @@ async def gmail_label_get(user_id: str, label_id: str, request: Request):
     return _label_obj(label_id, (messages, threads) if label_id == _GMAIL_DEFAULT_LABEL else (0, 0))
 
 
-_GMAIL_OP = re.compile(r'(\w+):("[^"]*"|\S+)')
+# The lookbehinds are the four `_GMAIL_ADDRESS_KEYS`; their comment says why.
+_GMAIL_OP = re.compile(
+    r'(\w+):(?:(?:(?<=\bfrom:)|(?<=\bto:)|(?<=\bcc:)|(?<=\bbcc:))\s*)?("[^"]*"|\S*)', re.IGNORECASE
+)
 # operators we honor; anything else stays as free text
 _GMAIL_KEYS = {
     "from",
@@ -660,6 +663,15 @@ _GMAIL_KEYS = {
 # `before:X`, for each value X tried, read as a date or not. An empty `newer:` is the search term
 # `newer`, as an empty `after:` is `after`, and `_GMAIL_OP` leaves both in the free text.
 _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
+# The address operators. A Gmail search ignores one with no value rather than searching it as free
+# text, and reads the word after whitespace as its value. Measured on a Workspace mailbox: `to:`,
+# `from:` and `bcc:` with no value answered every message, as no `q` does (2026-10-14), and so did
+# `cc:`, `from:""` and `to:""` (2026-10-16). On 2026-10-16, `from: <word>`, `bcc: <word>`,
+# `to:<tab><word>`, `From: <word>` and `TO: <word>` answered the ids the operator answers with no
+# whitespace, and `to: from: bcc:` answered nothing. `has: attachment` and `newer_than: 7d` answered
+# nothing where `has:attachment` and `newer_than:7d` answered 160 and 36 messages, so `_GMAIL_OP`
+# reads across whitespace for these four alone.
+_GMAIL_ADDRESS_KEYS = {"from", "to", "cc", "bcc"}
 
 
 # The operators whose value a `+` ends. Measured on a Workspace mailbox on 2026-10-15:
@@ -690,7 +702,10 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         key = m.group(1).lower()
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
-            ops.setdefault(key, []).append(m.group(2).strip('"'))
+            raw = m.group(2)
+            if not raw and key not in _GMAIL_ADDRESS_KEYS:
+                return m.group(0)
+            ops.setdefault(key, []).append(raw.strip('"'))
             return " "
         return m.group(0)
 
@@ -760,8 +775,8 @@ _GMAIL_ADDRESS = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
 
 
 def _gmail_address_match(header: str | None, value: str) -> bool:
-    """Whether a `Cc` or `Bcc` header answers a `cc:` or `bcc:` value as Gmail answers it, in any
-    case. A value shaped like one address matches an address in the header exactly: `lena@acme.com`
+    """Whether an address header answers an address search value as Gmail answers it, in any case.
+    A value shaped like one address matches an address in the header exactly: `lena@acme.com`
     does, `lena@acme` names no address and matches nothing. Any other value matches when its words
     come one after another among the header's words, display names included: `lena`, `acme`,
     `acme.com`, `@acme.com` and `lena@` match `Lena Park <lena@acme.com>`, and so does `park`,
@@ -773,7 +788,12 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
     Measured on a Workspace mailbox of 595 messages on 2026-10-15: 113 searches on `cc:` and
     `bcc:`, compared with the headers of every message, all match this rule, and of the 32 ASCII
     punctuation marks sent alone as a `cc:` value, `_` and `&` match nothing and the other 30 match
-    every message. On 2026-10-14, `cc:<a local part>+x` read `+x` as a search term of its own."""
+    every message. On the same mailbox at 601 messages on 2026-10-16, 122 of 124 `from:` and `to:`
+    searches built from its own addresses, local parts, domains and display-name words match this
+    rule over `From`, and over `To`, `Cc` and `Bcc` together; `to:me` counts the four messages
+    where the caller is in `Bcc` alone. The other two are a hyphenated value, which real also reads
+    joined (`no-reply` finds `noreply@` as well as `no-reply@`), and part of a Korean display
+    name. On 2026-10-14, `cc:<a local part>+x` read `+x` as a search term of its own."""
     header = (header or "").lower()
     value = value.lower()
     if _GMAIL_ONE_ADDRESS.fullmatch(value):
@@ -788,10 +808,10 @@ def _gmail_op_match(row, ops: dict) -> bool:
     if _GMAIL_NOTHING in ops:
         return False
     for v in ops.get("from", []):
-        if v.lower() not in (row["author_email"] or "").lower():
+        if not _gmail_address_match(row["author_email"], v):
             return False
     for v in ops.get("to", []):
-        if v.lower() not in (row["to_addr"] or "").lower():
+        if not any(_gmail_address_match(row[k], v) for k in ("to_addr", "cc", "bcc")):
             return False
     for key in ("cc", "bcc"):
         for v in ops.get(key, []):
@@ -829,7 +849,7 @@ def _gmail_query(conn, mailbox, ids, q: str, caller_email: str | None = None) ->
     present; otherwise the mailbox listing). The caller paginates the returned rows."""
     free, ops = _parse_gmail_q(q)
     if caller_email:
-        for key in ("cc", "bcc"):
+        for key in ("from", "to", "cc", "bcc"):
             if key in ops:
                 ops[key] = [caller_email if v.lower() == "me" else v for v in ops[key]]
     ops = _resolve_relative_dates(ops)  # newer_than:/older_than: -> absolute after:/before: bounds
@@ -2650,8 +2670,11 @@ async def drive_files_get(file_id: str, request: Request):
     ids = auth.visible_ids(request, caller)
     row = store.gdrive_by_id(conn, file_id, visible_ids=ids)
     if row is None:
-        name = _drive_folder_name_by_id(conn, file_id)  # folders aren't stored as rows
-        if name is not None:
+        # Folders aren't stored as rows. Measured 2026-10-15 and 2026-10-16 with a Workspace
+        # member's token: real serves a folder the caller can see with 200, and answers one it
+        # cannot see with the 404 notFound an id that names nothing gets, `fields` mask or not.
+        name = _drive_folder_name_by_id(conn, file_id)
+        if name is not None and store.drive_folder_has_visible(conn, name, ids):
             keys = _drive_get_field_keys(gerr.first_repeat(request.query_params, "fields"))
             return _drive_project([_drive_folder_obj(conn, name, caller.email)], keys)[0]
         raise gerr.not_found_file(file_id)
@@ -2768,9 +2791,11 @@ async def drive_files_permissions(file_id: str, request: Request):
     if row is None:
         # A folder id is a first-class file id on real Drive — files.get answers for one, so
         # permissions.list has to as well. Folders aren't stored as rows, so their sharing comes
-        # from the grants on the files they hold.
+        # from the grants on the files they hold. Measured 2026-10-15 and 2026-10-16 with a
+        # Workspace member's token, real answers a folder the caller cannot see with the 404
+        # notFound an id that names nothing gets.
         name = _drive_folder_name_by_id(conn, file_id)
-        if name is None:
+        if name is None or not store.drive_folder_has_visible(conn, name, ids):
             raise gerr.not_found_file(file_id)
         permissions = _drive_permissions(conn, file_id, folder=name)
     else:
@@ -2913,14 +2938,20 @@ async def docs_get(document_id: str, request: Request):
         content.append(
             {"paragraph": {"elements": [{"textRun": {"content": line + "\n", "textStyle": {}}}]}}
         )
+    # Real's order for an untabbed read (docs.googleapis.com, 2026-10-16, twelve Docs, six owned by
+    # a Workspace member and six by a consumer account), the same under each `suggestionsViewMode`,
+    # `includeTabsContent=false` and a `fields` mask naming the members in another order
+    # (`documentId,title`, `revisionId,body,title`). Real also serves `headers` and `footers` after
+    # `body`, `lists` after `namedStyles` and `inlineObjects` before `documentId` when a Doc has
+    # them; this server serves none of the four.
     return {
-        "documentId": document_id,
         "title": row["title"],
-        "revisionId": synth._digest(document_id)[:24],
-        "suggestionsViewMode": "SUGGESTIONS_INLINE",
         "body": {"content": content},
         "documentStyle": {},
         "namedStyles": {"styles": []},
+        "revisionId": synth._digest(document_id)[:24],
+        "suggestionsViewMode": "SUGGESTIONS_INLINE",
+        "documentId": document_id,
         # Last, where real serves it. Real's value for a read that asks for no comments, whatever
         # `suggestionsViewMode` and `includeTabsContent` select (measured 2026-10-09 and
         # 2026-10-15); `commentsViewMode=COMMENTS_VIEW_MODE_INCLUDED` beside the tabs and inline
