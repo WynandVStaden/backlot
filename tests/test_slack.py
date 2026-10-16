@@ -950,6 +950,58 @@ def test_slack_numeric_arguments_are_read_as_real_reads_them(client, admin_h, me
         assert any(v for v in same.values() if isinstance(v, list)), same
 
 
+_EVERY = "<every item, as with no limit>"
+_FATAL = "<fatal_error>"
+
+
+@pytest.mark.parametrize(
+    "method, limit, want",
+    [
+        *(
+            (m, v, _EVERY)
+            for m in ("conversations.list", "conversations.members")
+            for v in ("-1", "-1.5", "-5", "-9223372036854775809", "-1e19", "1e19", "9.3e18")
+        ),
+        *(
+            ("conversations.history", v, 1)
+            for v in ("-1", "-1.5", "-2", "-9223372036854775808", "-1e19")
+        ),
+        *(("users.list", v, 0) for v in ("-1", "-1.5")),
+        *(
+            ("users.list", v, _FATAL)
+            for v in ("-2", "-5", "-9223372036854775808", "-9223372036854775809", "-1e19")
+            + ("9223372036854775808", "9.3e18", "1e19")
+        ),
+        *(("users.list", v, _EVERY) for v in ("9223372036854775807", "9.2e18", "1e300")),
+    ],
+)
+def test_slack_negative_and_out_of_range_limits(client, admin_h, method, limit, want):
+    """A negative `limit`, and one past a signed 64-bit integer, as slack.com/api answered each:
+    the rows of the measurement on `_limit`."""
+    cid = _a_channel_id(client, admin_h)
+    channel = (
+        {"channel": cid} if method.startswith("conversations.") and "list" not in method else {}
+    )
+
+    def get(**ps):
+        r = client.get(f"/slack/api/{method}", headers=admin_h, params={**channel, **ps})
+        assert r.status_code == 200
+        return r.json()
+
+    got = get(limit=limit)
+    if want == _FATAL:
+        assert got == {"ok": False, "error": "fatal_error"}
+        return
+    assert got["ok"] is True
+    if want == _EVERY:
+        assert got == get()
+        return
+    if method == "users.list":  # no members, and a cursor
+        assert got["members"] == [] and got["response_metadata"]["next_cursor"]
+    else:  # one message, as `limit=1` serves
+        assert got == get(limit="1")
+
+
 def test_slack_search_all(client, admin_h):
     # slack-go's Search()/SearchContext() hits search.all; it must return both messages + files.
     j = client.post("/slack/api/search.all", headers=admin_h, data={"query": "the"}).json()
