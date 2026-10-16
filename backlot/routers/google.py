@@ -638,7 +638,10 @@ async def gmail_label_get(user_id: str, label_id: str, request: Request):
 
 # The lookbehinds are the four `_GMAIL_ADDRESS_KEYS`; their comment says why.
 _GMAIL_OP = re.compile(
-    r'(\w+):(?:(?:(?<=\bfrom:)|(?<=\bto:)|(?<=\bcc:)|(?<=\bbcc:))\s*)?("[^"]*"|\S*)', re.IGNORECASE
+    r"(\w+):(?:(?:(?<=\bfrom:)|(?<=\bto:)|(?<=\bcc:)|(?<=\bbcc:)"
+    r"|(?<=\bafter:)|(?<=\bbefore:)|(?<=\bnewer:))\s*)?"
+    r'("[^"]*"|\S*)',
+    re.IGNORECASE,
 )
 # operators we honor; anything else stays as free text
 _GMAIL_KEYS = {
@@ -688,6 +691,43 @@ _GMAIL_PLUS_ENDS = {"from", "to", "cc", "bcc", "subject"}
 # The `ops` key of a value that ends in `+`: real answers such a search with nothing. No operator
 # can be named this, since `_GMAIL_OP` reads a name of at least one word character.
 _GMAIL_NOTHING = ""
+# How real reads the value of `after:` and `before:` (and so of `newer:` and `older:`). Measured on
+# a Workspace mailbox of 595 messages on 2026-10-15, comparing the ids each query returned: a date
+# written year first or month first, with `/` or `-`, with or without leading zeros and with a
+# trailing `/` (`2026-10-1`, `10/1/2026`, `10-01-2026`, `2026/10/01/`), answered as
+# `after:2026/10/01`, and `01/10/2026` as 10 January; a positive count of seconds (`1790812800`)
+# answered as the instant it names, and `1` every message. `abc`, `2026/13/01`, `2026/02/30`,
+# `2026/10/32`, `2026.10.01`, `2026-10-01T00:00`, `0`, `-1`, `"2026/10/01"`, `'2026/10/01'` and
+# `(2026/10/01)` answered nothing, and so did a query holding one of them beside a value real
+# reads. The value is read after one or two spaces as well (`after: 2026/10/01`, `before:
+# 2026/10/01`; `_GMAIL_OP`). A `-` in front negates the operator: `-after:2026/10/01` answered as
+# `before:2026/10/01`, and `-before:X` as `after:X`. `after:-` is the search term `after`, as an
+# empty `after:` is.
+_GMAIL_DATE_KEYS = {"after", "before"}
+_GMAIL_YMD = re.compile(r"(\d{4})([/-])(\d{1,2})\2(\d{1,2})")
+_GMAIL_MDY = re.compile(r"(\d{1,2})([/-])(\d{1,2})\2(\d{4})")
+_GMAIL_NEGATED_DATE = re.compile(r"(?<!\S)-(after|before|newer|older):", re.IGNORECASE)
+_GMAIL_NEGATION = {"after": "before", "before": "after", "newer": "older", "older": "newer"}
+
+
+def _gmail_q_date(v: str) -> str | None:
+    """The epoch seconds an `after:` or `before:` value in a search names, as `_gmail_date` reads
+    them, or None for a value real answers with nothing (the measurement at `_GMAIL_DATE_KEYS`)."""
+    if v.endswith("/"):
+        v = v[:-1]
+    if re.fullmatch(r"[1-9][0-9]*", v):
+        return v
+    if m := _GMAIL_YMD.fullmatch(v):
+        y, mo, d = m.group(1), m.group(3), m.group(4)
+    elif m := _GMAIL_MDY.fullmatch(v):
+        mo, d, y = m.group(1), m.group(3), m.group(4)
+    else:
+        return None
+    try:
+        day = datetime.datetime(int(y), int(mo), int(d), tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    return str(int(day.timestamp()))
 
 
 def _parse_gmail_q(q: str) -> tuple[str, dict]:
@@ -703,6 +743,12 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
             value = m.group(2)
             if not value and key not in _GMAIL_ADDRESS_KEYS:
                 return m.group(0)
+            if key in _GMAIL_DATE_KEYS:
+                if value == "-":
+                    return m.group(0)
+                read = _gmail_q_date(value)
+                ops.setdefault(_GMAIL_NOTHING if read is None else key, []).append(read or value)
+                return " "
             if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
                 value = value.lstrip("+")
                 if re.search(r"[^@]@", value):
@@ -719,6 +765,7 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
             return " "
         return m.group(0)
 
+    q = _GMAIL_NEGATED_DATE.sub(lambda m: _GMAIL_NEGATION[m.group(1).lower()] + ":", q)
     free = re.sub(r"\s+", " ", _GMAIL_OP.sub(_take, q)).strip()
     # A `+` standing alone is no search term, and a word ending in one matches nothing (the
     # measurement at `_GMAIL_PLUS_ENDS`).
