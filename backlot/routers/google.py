@@ -660,6 +660,16 @@ _GMAIL_KEYS = {
 # `before:X`, for each value X tried, read as a date or not. An empty `newer:` is the search term
 # `newer`, as an empty `after:` is `after`, and `_GMAIL_OP` leaves both in the free text.
 _GMAIL_KEY_ALIASES = {"newer": "after", "older": "before"}
+# The operators whose value a `+` ends. Measured on a Workspace mailbox on 2026-10-15:
+# `cc:<local>+<word>`, `from:<local>+update` and `to:<local>+update` answered the ids of the
+# operator with `+<word>` sent as a search term of its own; `cc:<local>+`, `cc:<local>++` and
+# `from:<local>+   to:<local>+` answered nothing; `cc:+<local>` answered as `cc:<local>` does,
+# `+` alone with every message, and `cc:<local> +` as `cc:<local>`.
+# `bcc:` and `subject:` were not measured, so their values keep a `+`.
+_GMAIL_PLUS_ENDS = {"from", "to", "cc"}
+# The `ops` key of a value that ends in `+`: real answers such a search with nothing. No operator
+# can be named this, since `_GMAIL_OP` reads a name of at least one word character.
+_GMAIL_NOTHING = ""
 
 
 def _parse_gmail_q(q: str) -> tuple[str, dict]:
@@ -672,11 +682,23 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         key = m.group(1).lower()
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
-            ops.setdefault(key, []).append(m.group(2).strip('"'))
+            value = m.group(2)
+            if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
+                value, plus, term = value.lstrip("+").partition("+")
+                if plus and not term.strip("+"):
+                    ops.setdefault(_GMAIL_NOTHING, []).append(value)
+                    return " "
+                if plus:
+                    ops.setdefault(key, []).append(value)
+                    return f" +{term} "
+            ops.setdefault(key, []).append(value.strip('"'))
             return " "
         return m.group(0)
 
     free = re.sub(r"\s+", " ", _GMAIL_OP.sub(_take, q)).strip()
+    # A `+` standing alone is no search term (the measurement at `_GMAIL_PLUS_ENDS`).
+    if not (len(free) >= 2 and free[0] == free[-1] == '"'):
+        free = " ".join(t for t in free.split(" ") if t != "+")
     return free, ops
 
 
@@ -760,6 +782,8 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
 
 
 def _gmail_op_match(row, ops: dict) -> bool:
+    if _GMAIL_NOTHING in ops:
+        return False
     for v in ops.get("from", []):
         if v.lower() not in (row["author_email"] or "").lower():
             return False
