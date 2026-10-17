@@ -395,10 +395,25 @@ _OCT_1 = "1790812800"  # 2026-10-01T00:00:00Z
         (_OCT_1, _OCT_1),
         ("01/10/2026", "1768003200"),  # 10 January
         ("1", "1"),
+        ("01", "1"),
+        ("01790812800", _OCT_1),
+        ("253402300800", "253402300800"),
+        *((v, _OCT_1) for v in ("2026/10/01//", "2026/10/01.", "1790812800,", "2026/10/01:")),
+        *((v, _OCT_1) for v in ("02026/10/01", "2026/010/01")),
+        ("15/10/2026", "1792022400"),  # 15 October
+        ("26/10/05", "1791158400"),
+        ("026/10/05", "1791158400"),
+        ("2026/10/005", "1791158400"),
+        ("9/30/26", "1790726400"),
+        ("10/05/26", "1274832000"),  # 26 May 2010
+        ("30/9/26", "1916611200"),
         *(
             (v, None)
             for v in ("abc", "2026/13/01", "2026/02/30", "2026/10/32", "2026.10.01")
             + ("2026-10-01T00:00", "0", "-1", '"2026/10/01"', "'2026/10/01'", "(2026/10/01)")
+            + ("000", "+1790812800", "1e9", "2026/10-01", "0010/05/2026", "00/01/2026")
+            + ("9223372036854", "99999999999999999999")
+            + ("\uff12\uff10\uff12\uff16/\uff11\uff10/\uff10\uff11",)
         ),
     ],
 )
@@ -410,17 +425,16 @@ def test_gmail_after_before_value(value, want):
 
 
 def test_gmail_after_before_parse():
-    """A value real cannot read leaves nothing to match, beside a readable one too; the value is
-    read after a space; a `-` negates the operator; `after:-` stays a search term."""
+    """A value real cannot read leaves nothing to match, beside a readable one too; a `-` negates
+    the operator, or drops it when its value does not read; `after:-` stays a search term."""
     from backlot.routers.google import _GMAIL_NOTHING, _parse_gmail_q
 
     for q in ("after:abc", "before:2026/02/30", "after:0", 'after:"2026/10/01"'):
         assert _GMAIL_NOTHING in _parse_gmail_q(q)[1], q
     assert _GMAIL_NOTHING in _parse_gmail_q("after:2026/10/01 after:abc")[1]
-    for q in ("after: 2026/10/01", "after:  2026/10/01", "newer: 2026/10/01"):
-        assert _parse_gmail_q(q) == ("", {"after": [_OCT_1]}), q
-    assert _parse_gmail_q("before: 2026/10/01") == ("", {"before": [_OCT_1]})
     assert _parse_gmail_q("-after:2026/10/01") == ("", {"before": [_OCT_1]})
+    assert _parse_gmail_q("-after: 2026/10/01") == ("", {"before": [_OCT_1]})
+    assert _parse_gmail_q("-after:abc") == _parse_gmail_q("-before:0") == ("", {})
     assert _parse_gmail_q("-before:2026/10/01") == ("", {"after": [_OCT_1]})
     assert _parse_gmail_q("-newer:2026/10/01") == ("", {"before": [_OCT_1]})
     assert _parse_gmail_q("after:-") == ("after:-", {})
@@ -459,11 +473,12 @@ def test_gmail_after_before_over_the_wire(tmp_path):
 
         for q in ("after:2026/10/01", "after:10/01/2026", "after:10-01-2026", "after:2026/10/01/"):
             assert count(q) == 2, q
-        assert count("after: 2026/10/01") == 2
         for q in ("after:abc", "after:2026/13/01", "after:0", 'after:"2026/10/01"'):
             assert count(q) == 0, q
         assert count("after:2026/10/01 after:abc") == 0
         assert count("-after:2026/10/01") == count("before:2026/10/01") == 1
+        assert count("-after:abc") == 3
+        assert count("before:99999999999999999999") == 0
 
 
 def test_github_search_q_parse():
