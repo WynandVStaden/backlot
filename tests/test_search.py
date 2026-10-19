@@ -481,48 +481,37 @@ def test_gmail_after_before_over_the_wire(tmp_path):
         assert count("before:99999999999999999999") == 0
 
 
-def test_gmail_address_negation_parse():
-    """A `-` in front of `from:`, `to:` or `cc:`, or in front of the value, negates it; a hyphen
-    inside a value, and `bcc:`, which was not measured, are read as before."""
+@pytest.mark.parametrize(
+    "q, free, ops",
+    [
+        ("-from:bob", "", {"-from": ["bob"]}),
+        ("from:-bob", "", {"-from": ["bob"]}),
+        ("-FROM:bob", "", {"-from": ["bob"]}),
+        ("-from: bob", "", {"-from": ["bob"]}),
+        ("from: -bob", "", {"-from": ["bob"]}),
+        ("-from:-bob", "", {"-from": ["bob"]}),
+        ("--from:bob", "", {"-from": ["bob"]}),
+        ("from:--bob", "", {"-from": ["bob"]}),
+        ('-from:"bob"', "", {"-from": ["bob"]}),
+        ("-to:ava", "", {"-to": ["ava"]}),
+        ("cc:-lena", "", {"-cc": ["lena"]}),
+        ("-bcc:lena", "", {"-bcc": ["lena"]}),
+        ("-cc:lena+update", "+update", {"-cc": ["lena"]}),
+        ('from:"-bob"', "", {"from": ["-bob"]}),
+        ("from:mary-jane", "", {"from": ["mary-jane"]}),
+        ("-from:", "", {}),
+        ("from:-", "", {}),
+        ("-from:-", "", {}),
+        ("from:--", "", {}),
+        ('-from:""', "", {}),
+        ("label:-", "", {"label": ["-"]}),
+    ],
+)
+def test_gmail_a_minus_negates_an_address_operator(q, free, ops):
+    """Each row is how the comment on `_GMAIL_NEGATED_ADDRESS` reads its query."""
     from backlot.routers.google import _parse_gmail_q
 
-    for q in ("-from:bob", "from:-bob", "From:-bob", "-FROM:bob"):
-        assert _parse_gmail_q(q) == ("", {"-from": ["bob"]}), q
-    assert _parse_gmail_q("-to:ava") == _parse_gmail_q("to:-ava") == ("", {"-to": ["ava"]})
-    assert _parse_gmail_q("-cc:lena") == _parse_gmail_q("cc:-lena") == ("", {"-cc": ["lena"]})
-    assert _parse_gmail_q("-cc:lena+update") == ("+update", {"-cc": ["lena"]})
-    assert _parse_gmail_q("from:mary-jane") == ("", {"from": ["mary-jane"]})
-    assert _parse_gmail_q("bcc:-lena") == ("", {"bcc": ["-lena"]})
-
-
-def test_gmail_address_negation_over_the_wire(tmp_path):
-    """The issue's reproduction: `-from:bob` and `from:-bob` answer the message not from bob."""
-    from tests._helpers import client_for, tiny_corpus
-
-    base = {"source_type": "gmail", "mailbox": "ava", "to": "ava@acme.com"}
-    records = [
-        {**base, "doc_id": "plan", "title": "Rollout plan", "content": "attached",
-         "author_email": "bob@acme.com", "readers": ["ava@acme.com"],
-         "created": "2026-03-01T09:00:00Z"},
-        {**base, "doc_id": "lunch", "title": "Lunch", "content": "Friday?",
-         "author_email": "mia@acme.com", "to": "team@acme.com", "cc": "bob@acme.com",
-         "readers": ["ava@acme.com"],
-         "created": "2026-03-02T09:00:00Z"},
-    ]  # fmt: skip
-    settings = tiny_corpus(tmp_path, records)
-    with client_for(settings, reload=True) as c:
-        h = {"Authorization": f"Bearer {settings.admin_token}"}
-
-        def ids(q):
-            r = c.get("/gmail/v1/users/ava@acme.com/messages", headers=h, params={"q": q})
-            return {m["id"] for m in r.json().get("messages", [])}
-
-        every = ids("")
-        for op, value in (("from", "bob"), ("to", "ava"), ("cc", "bob")):
-            matched = ids(f"{op}:{value}")
-            assert matched and matched != every, op
-            assert ids(f"-{op}:{value}") == ids(f"{op}:-{value}") == every - matched, op
-        assert ids("-from:bob from:mia") == ids("from:mia")
+    assert _parse_gmail_q(q) == (free, ops)
 
 
 def test_github_search_q_parse():

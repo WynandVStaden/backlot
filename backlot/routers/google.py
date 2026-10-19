@@ -722,13 +722,19 @@ _GMAIL_DATE_KEYS = {"after", "before"}
 _GMAIL_SECONDS_MAX = 253402300800
 _GMAIL_DATE = re.compile(r"([0-9]+)([/-])([0-9]+)\2([0-9]+)")
 _GMAIL_NEGATED_DATE = re.compile(r"(?<!\S)-(after|before|newer|older): *(\S+)", re.IGNORECASE)
-# A `-` in front of an address operator or in front of its value negates it. Measured on a
-# Workspace mailbox of 603 messages on 2026-10-17, comparing `messages.list` id sets: `-from:<word>`
-# and `from:-<word>` each answered the messages `from:<word>` does not, and so did `to:` and `cc:`,
-# for three words on each operator and for 15 hyphenated local parts sent as `from:-<local part>`.
-# `bcc:` was not measured. A negated value is stored under its key with a `-` in front.
-_GMAIL_NEGATABLE = {"from", "to", "cc"}
-_GMAIL_NEGATED_ADDRESS = re.compile(r"(?<!\S)-(from|to|cc):(?=\S)", re.IGNORECASE)
+# A `-` in front of an address operator, or in front of its value, negates it. Measured on a
+# Workspace mailbox, comparing `messages.list` id sets: on 2026-10-17, `-from:<word>` and
+# `from:-<word>` each answered the messages `from:<word>` does not, and so did `to:` and `cc:`, for
+# three words on each operator and for 15 hyphenated local parts sent as `from:-<local part>`. On
+# 2026-10-18, so did `bcc:`, and on all four operators `-from: <word>`, `from: -<word>`,
+# `-from:-<word>`, `--from:<word>`, `from:--<word>`, `-FROM:<word>`, `-from:"<word>"`, a whole
+# address, an `@<domain>` and `me`; `from:"-<word>"` answered as `from:<word>`, and `-from:`,
+# `from:-`, `-from:-`, `from:--` and `-from:""` every message. Another operator keeps the `-` in its
+# value: `label:-` answered nothing. Not modelled: `- from:<word>` answered as `from:<word>`, where
+# the `-` standing alone is searched here as a term, and `from:-<word>+update` answered every
+# message, where `-from:<word>+update` answered the messages of `+update` that `from:<word>` leaves
+# out. A negated value is stored under its key with a `-` in front.
+_GMAIL_NEGATED_ADDRESS = re.compile(r"(?<!\S)-+(from|to|cc|bcc):\s*", re.IGNORECASE)
 _GMAIL_NEGATION = {"after": "before", "before": "after", "newer": "older", "older": "newer"}
 
 
@@ -780,8 +786,10 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
                 ops.setdefault(_GMAIL_NOTHING if read is None else key, []).append(read or value)
                 return " "
             stored = key
-            if key in _GMAIL_NEGATABLE and value.startswith("-") and value != "-":
-                value, stored = value[1:], f"-{key}"
+            if key in _GMAIL_ADDRESS_KEYS and value.startswith("-"):
+                value, stored = value.lstrip("-"), f"-{key}"
+                if not _GMAIL_ADDRESS_WORD.search(value):
+                    return " "
             if key in _GMAIL_PLUS_ENDS and not value.startswith('"'):
                 value = value.lstrip("+")
                 if re.search(r"[^@]@", value):
@@ -914,9 +922,10 @@ def _gmail_op_match(row, ops: dict) -> bool:
     for v in ops.get("-to", []):
         if any(_gmail_address_match(row[k], v) for k in ("to_addr", "cc", "bcc")):
             return False
-    for v in ops.get("-cc", []):
-        if _gmail_address_match(row["cc"], v):
-            return False
+    for key in ("cc", "bcc"):
+        for v in ops.get(f"-{key}", []):
+            if _gmail_address_match(row[key], v):
+                return False
     for v in ops.get("subject", []):
         if v.lower() not in (row["title"] or "").lower():
             return False
@@ -949,7 +958,7 @@ def _gmail_query(conn, mailbox, ids, q: str, caller_email: str | None = None) ->
     present; otherwise the mailbox listing). The caller paginates the returned rows."""
     free, ops = _parse_gmail_q(q)
     if caller_email:
-        for key in ("from", "to", "cc", "bcc", "-from", "-to", "-cc"):
+        for key in ("from", "to", "cc", "bcc", "-from", "-to", "-cc", "-bcc"):
             if key in ops:
                 ops[key] = [caller_email if v.lower() == "me" else v for v in ops[key]]
     ops = _resolve_relative_dates(ops)  # newer_than:/older_than: -> absolute after:/before: bounds
