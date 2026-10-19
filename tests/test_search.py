@@ -537,6 +537,68 @@ def test_gmail_a_minus_negates_an_address_operator(q, free, ops):
     assert _parse_gmail_q(q) == (free, ops)
 
 
+@pytest.mark.parametrize("empty", ["subject:", "label:", "in:", "subject:\t", 'subject:""'])
+@pytest.mark.parametrize(
+    "after, ops",
+    [
+        ("label:inbox", {"label": ["inbox"]}),
+        ("in:sent", {"in": ["sent"]}),
+        ("has:attachment", {"has": ["attachment"]}),
+        ("after:2026/10/01", {"after": ["1790812800"]}),
+    ],
+)
+def test_gmail_empty_operator_before_one_that_applies(empty, after, ops):
+    """An empty `subject:`, `label:` or `in:` before `label:`, `in:`, `has:` or `after:` is
+    dropped and the next operator applies, as the comment on `_GMAIL_EMPTY_BEFORE` measures."""
+    from backlot.routers.google import _parse_gmail_q
+
+    sep = "" if empty.endswith("\t") else " "
+    assert _parse_gmail_q(f"{empty}{sep}{after}") == ("", ops)
+
+
+def test_gmail_empty_operator_before_one_that_does_not_apply():
+    """Before `subject:`, `from:` or an empty `label:` the empty one keeps reading the next word,
+    so the search matches nothing; with no whitespace, and after an address operator, nothing
+    changes."""
+    from backlot.routers.google import _parse_gmail_q
+
+    assert _parse_gmail_q("subject: subject:probe") == ("", {"subject": ["subject:probe"]})
+    assert _parse_gmail_q("label: from:bob") == ("", {"label": ["from:bob"]})
+    assert _parse_gmail_q("subject: label:") == ("", {"subject": ["label:"]})
+    assert _parse_gmail_q("subject:label:inbox") == ("", {"subject": ["label:inbox"]})
+    assert _parse_gmail_q("from: label:inbox") == ("", {"from": ["label:inbox"]})
+
+
+def test_gmail_empty_operator_over_the_wire(tmp_path):
+    """The issue's reproduction: one message in the inbox, one sent."""
+    from tests._helpers import client_for, tiny_corpus
+
+    base = {"source_type": "gmail", "mailbox": "ava", "to": "ava@acme.com"}
+    records = [
+        {**base, "doc_id": "plan", "title": "Rollout plan", "content": "attached",
+         "author_email": "bob@acme.com", "label_ids": ["INBOX"], "readers": ["ava@acme.com"],
+         "created": "2026-03-01T09:00:00Z"},
+        {**base, "doc_id": "lunch", "title": "Lunch", "content": "Friday?",
+         "author_email": "mia@acme.com", "label_ids": ["SENT"], "readers": ["ava@acme.com"],
+         "created": "2026-03-02T09:00:00Z"},
+    ]  # fmt: skip
+    settings = tiny_corpus(tmp_path, records)
+    with client_for(settings, reload=True) as c:
+        h = {"Authorization": f"Bearer {settings.admin_token}"}
+
+        def ids(q):
+            r = c.get("/gmail/v1/users/ava@acme.com/messages", headers=h, params={"q": q})
+            return {m["id"] for m in r.json().get("messages", [])}
+
+        inbox, sent = ids("label:inbox"), ids("in:sent")
+        assert inbox and sent and inbox != sent
+        for q in ("subject: label:inbox", "label: label:inbox", "in: label:inbox"):
+            assert ids(q) == inbox, q
+        assert ids('subject:"" label:inbox') == inbox
+        assert ids("label: in:sent") == sent
+        assert ids("subject: subject:plan") == ids("subject: from:bob") == set()
+
+
 def test_github_search_q_parse():
     """One parser, a qualifier vocabulary per endpoint: a key the endpoint does not honor stays
     free text, so the FTS still gets a chance at it."""

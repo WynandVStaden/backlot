@@ -653,6 +653,16 @@ _GMAIL_SPACED = (
     r"(?<=\bfrom:)|(?<=\bto:)|(?<=\bcc:)|(?<=\bbcc:)|(?<=\bsubject:)|(?<=\blabel:)|(?<=\bin:)"
 )
 _GMAIL_DATED = r"(?<=\bafter:)|(?<=\bbefore:)|(?<=\bnewer:)|(?<=\bolder:)"
+# An empty `subject:`, `label:` or `in:` before one of these operators is dropped and that operator
+# applies. Measured on a Workspace mailbox on 2026-10-17 and 2026-10-18, comparing `messages.list`
+# id sets: `subject: label:inbox`, `label: label:inbox`, `in: label:inbox` and
+# `subject:<tab>label:inbox` answered the ids of `label:inbox`, and likewise `in:sent`,
+# `has:attachment` and `after:2026/10/01` after an empty one; on 2026-10-19 `subject:"" label:inbox`
+# did too. Before `subject:`, `from:` or an empty `label:` the empty one stays and the search
+# answered nothing, as reading the next word as its value already gives. The other operators were
+# not measured after an empty one.
+_GMAIL_EMPTY_BEFORE = {"subject", "label", "in"}
+_GMAIL_APPLIES_AFTER_EMPTY = re.compile(r"(?:label|in|has|after):\S", re.IGNORECASE)
 _GMAIL_OP = re.compile(
     rf'(\w+):(?:(?:{_GMAIL_SPACED})(?:\s|"\s*")*|(?:{_GMAIL_DATED}) *)?("[^"]*"|\S*)', re.IGNORECASE
 )
@@ -796,6 +806,9 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
             value = m.group(2)
+            spaced = len(m.group(0)) > len(m.group(1)) + 1 + len(value)
+            if key in _GMAIL_EMPTY_BEFORE and spaced and _GMAIL_APPLIES_AFTER_EMPTY.match(value):
+                return _take(_GMAIL_OP.match(value))
             if not value and key not in _GMAIL_ADDRESS_KEYS:
                 if key in _GMAIL_DROPPED_WHEN_EMPTY:
                     return " "
