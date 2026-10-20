@@ -653,18 +653,32 @@ _GMAIL_SPACED = (
     r"(?<=\bfrom:)|(?<=\bto:)|(?<=\bcc:)|(?<=\bbcc:)|(?<=\bsubject:)|(?<=\blabel:)|(?<=\bin:)"
 )
 _GMAIL_DATED = r"(?<=\bafter:)|(?<=\bbefore:)|(?<=\bnewer:)|(?<=\bolder:)"
-# An empty `subject:`, `label:` or `in:` before one of these operators is dropped and that operator
-# applies. Measured on a Workspace mailbox on 2026-10-17 and 2026-10-18, comparing `messages.list`
-# id sets: `subject: label:inbox`, `label: label:inbox`, `in: label:inbox` and
-# `subject:<tab>label:inbox` answered the ids of `label:inbox`, and likewise `in:sent`,
-# `has:attachment` and `after:2026/10/01` after an empty one; on 2026-10-19 `subject:"" label:inbox`
-# did too. Before `subject:`, `from:` or an empty `label:` the empty one stays and the search
-# answered nothing, as reading the next word as its value already gives. The other operators were
-# not measured after an empty one.
-_GMAIL_EMPTY_BEFORE = {"subject", "label", "in"}
-_GMAIL_APPLIES_AFTER_EMPTY = re.compile(r"(?:label|in|has|after):\S", re.IGNORECASE)
+# An empty operator `_GMAIL_OP` drops, so that the operator after it applies. Measured on a
+# Workspace mailbox of 625 messages on 2026-10-19, comparing `messages.list` id sets
+# (`threads.list` answered the ten queries sent to it alike):
+#
+#   dropped   an empty `subject:`, `from:`, `to:`, `cc:` or `bcc:` with spaces, a tab, a pair of
+#             quotes holding nothing or spaces, or nothing at all after it, and an empty `label:` or
+#             `in:` with any of those except nothing, in any letter case, before `label:`, `in:`,
+#             `has:`, `after:`, `before:`, `newer:`, `older:`, `newer_than:` or `older_than:` whose
+#             value starts right after its colon, or after spaces for the four date operators:
+#             `subject:label:inbox`, `bcc:""in:sent`, `label:" "label:inbox`,
+#             `SUBJECT: NEWER_THAN:30d` and `in: before: 2026/10/01` answered the ids of the
+#             operator after the empty one
+#   kept      before `subject:`, `from:`, `to:`, `cc:` or `bcc:`, before one of those nine whose
+#             value is empty, quoted or (for the five that are not dates) after a space, before a
+#             date operator whose value is `-`, and with a no-break space after it:
+#             `subject: from:me`, `label: label:""`, `in: label:"inbox"`, `from: label: inbox`,
+#             `subject: after:-` and `subject:<no-break space>label:inbox` answered nothing, and
+#             `_GMAIL_OP` reads the next word as the empty operator's value
+_GMAIL_EMPTY_BEFORE = (
+    r'(?:(?:subject|from|to|cc|bcc):|(?:label|in):(?=[ \t"]))(?:[ \t]|"[ \t]*")*'
+    r'(?=(?:label|in|has|newer_than|older_than):[^\s"]|(?:after|before|newer|older): *[^\s"-])'
+)
 _GMAIL_OP = re.compile(
-    rf'(\w+):(?:(?:{_GMAIL_SPACED})(?:\s|"\s*")*|(?:{_GMAIL_DATED}) *)?("[^"]*"|\S*)', re.IGNORECASE
+    rf'(?:{_GMAIL_EMPTY_BEFORE})?(\w+):(?:(?:{_GMAIL_SPACED})(?:\s|"\s*")*|(?:{_GMAIL_DATED}) *)?'
+    r'("[^"]*"|\S*)',
+    re.IGNORECASE,
 )
 # operators we honor; anything else stays as free text
 _GMAIL_KEYS = {
@@ -806,9 +820,6 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
         if key in _GMAIL_KEYS:
             key = _GMAIL_KEY_ALIASES.get(key, key)
             value = m.group(2)
-            spaced = len(m.group(0)) > len(m.group(1)) + 1 + len(value)
-            if key in _GMAIL_EMPTY_BEFORE and spaced and _GMAIL_APPLIES_AFTER_EMPTY.match(value):
-                return _take(_GMAIL_OP.match(value))
             if not value and key not in _GMAIL_ADDRESS_KEYS:
                 if key in _GMAIL_DROPPED_WHEN_EMPTY:
                     return " "

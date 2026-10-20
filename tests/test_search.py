@@ -537,36 +537,48 @@ def test_gmail_a_minus_negates_an_address_operator(q, free, ops):
     assert _parse_gmail_q(q) == (free, ops)
 
 
-@pytest.mark.parametrize("empty", ["subject:", "label:", "in:", "subject:\t", 'subject:""'])
 @pytest.mark.parametrize(
-    "after, ops",
+    "q, free, ops",
     [
-        ("label:inbox", {"label": ["inbox"]}),
-        ("in:sent", {"in": ["sent"]}),
-        ("has:attachment", {"has": ["attachment"]}),
-        ("after:2026/10/01", {"after": ["1790812800"]}),
+        ("subject: label:inbox", "", {"label": ["inbox"]}),
+        ("label: in:sent", "", {"in": ["sent"]}),
+        ("in: has:attachment", "", {"has": ["attachment"]}),
+        ("from: after:2026/10/01", "", {"after": [_OCT_1]}),
+        ("to: before:2026/10/01", "", {"before": [_OCT_1]}),
+        ("cc: newer:2026/10/01", "", {"after": [_OCT_1]}),
+        ("bcc: older:2026/10/01", "", {"before": [_OCT_1]}),
+        ("subject: newer_than:30d", "", {"newer_than": ["30d"]}),
+        ("label: older_than:30d", "", {"older_than": ["30d"]}),
+        ("subject:label:inbox", "", {"label": ["inbox"]}),
+        ("bcc:in:sent", "", {"in": ["sent"]}),
+        ("subject:\tlabel:inbox", "", {"label": ["inbox"]}),
+        ("in:\tin:sent", "", {"in": ["sent"]}),
+        ("subject:  label:inbox", "", {"label": ["inbox"]}),
+        ('subject:"" label:inbox', "", {"label": ["inbox"]}),
+        ('label:""label:inbox', "", {"label": ["inbox"]}),
+        ('label:" "label:inbox', "", {"label": ["inbox"]}),
+        ("SUBJECT:LABEL:inbox", "", {"label": ["inbox"]}),
+        ("in: before: 2026/10/01", "", {"before": [_OCT_1]}),
+        ("subject:older: 2026/10/01", "", {"before": [_OCT_1]}),
+        ("subject: subject:probe", "", {"subject": ["subject:probe"]}),
+        ("label: from:me", "", {"label": ["from:me"]}),
+        ("in: to:me", "", {"in": ["to:me"]}),
+        ("from: cc:me", "", {"from": ["cc:me"]}),
+        ("subject: label:", "", {"subject": ["label:"]}),
+        ('label: label:""', "", {"label": ["label:"]}),
+        ('in: label:"inbox"', "", {"in": ['label:"inbox']}),
+        ("from: label: inbox", "inbox", {"from": ["label:"]}),
+        ("label:label:inbox", "", {"label": ["label:inbox"]}),
+        ("subject:\xa0label:inbox", "", {"subject": ["label:inbox"]}),
+        ("subject: after:-", "", {"subject": ["after:-"]}),
+        ('subject: after:"2026/10/01"', "", {"subject": ['after:"2026/10/01']}),
     ],
 )
-def test_gmail_empty_operator_before_one_that_applies(empty, after, ops):
-    """An empty `subject:`, `label:` or `in:` before `label:`, `in:`, `has:` or `after:` is
-    dropped and the next operator applies, as the comment on `_GMAIL_EMPTY_BEFORE` measures."""
+def test_gmail_an_empty_operator_before_another(q, free, ops):
+    """Each row is how the comment on `_GMAIL_EMPTY_BEFORE` reads its query."""
     from backlot.routers.google import _parse_gmail_q
 
-    sep = "" if empty.endswith("\t") else " "
-    assert _parse_gmail_q(f"{empty}{sep}{after}") == ("", ops)
-
-
-def test_gmail_empty_operator_before_one_that_does_not_apply():
-    """Before `subject:`, `from:` or an empty `label:` the empty one keeps reading the next word,
-    so the search matches nothing; with no whitespace, and after an address operator, nothing
-    changes."""
-    from backlot.routers.google import _parse_gmail_q
-
-    assert _parse_gmail_q("subject: subject:probe") == ("", {"subject": ["subject:probe"]})
-    assert _parse_gmail_q("label: from:bob") == ("", {"label": ["from:bob"]})
-    assert _parse_gmail_q("subject: label:") == ("", {"subject": ["label:"]})
-    assert _parse_gmail_q("subject:label:inbox") == ("", {"subject": ["label:inbox"]})
-    assert _parse_gmail_q("from: label:inbox") == ("", {"from": ["label:inbox"]})
+    assert _parse_gmail_q(q) == (free, ops)
 
 
 def test_gmail_empty_operator_over_the_wire(tmp_path):
@@ -595,8 +607,10 @@ def test_gmail_empty_operator_over_the_wire(tmp_path):
         for q in ("subject: label:inbox", "label: label:inbox", "in: label:inbox"):
             assert ids(q) == inbox, q
         assert ids('subject:"" label:inbox') == inbox
-        assert ids("label: in:sent") == sent
+        assert ids("label: in:sent") == ids("from: in:sent") == sent
+        assert ids("subject:plan") == ids("from:bob") == inbox
         assert ids("subject: subject:plan") == ids("subject: from:bob") == set()
+        assert ids('subject: label:"inbox"') == ids('subject: label:""') == set()
 
 
 def test_github_search_q_parse():
