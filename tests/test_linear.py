@@ -4916,8 +4916,6 @@ def test_linear_backward_pages_name_the_served_nodes(tmp_path, root, operation):
             assert empty["pageInfo"]["endCursor"] is None
             assert got(page("last: 50")) == forward[::-1]
         elif operation == "flags":
-            # the flag for the direction a page was not asked in is false, the other one tells
-            # whether a node lies past the page
             after = page("first: 1, after: " + lit(page("first: 1")["pageInfo"]["endCursor"]))
             assert after["pageInfo"]["hasPreviousPage"] is False
             assert after["pageInfo"]["hasNextPage"] is (len(forward) > 2)
