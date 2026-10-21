@@ -618,21 +618,42 @@ def test_gmail_empty_operator_over_the_wire(tmp_path):
     "q, want",
     [
         ("-subject:plan", ("", {"-subject": ["plan"]})),
+        ("-subject: plan", ("", {"-subject": ["plan"]})),
+        ("subject:-plan", ("", {"-subject": ["plan"]})),
         ("-label:inbox", ("", {"-label": ["inbox"]})),
+        ("-label: inbox", ("", {"-label": ["inbox"]})),
+        ("-label:\tinbox", ("", {"-label": ["inbox"]})),
+        ('-label: "inbox"', ("", {"-label": ["inbox"]})),
+        ('-label:"" inbox', ("", {"-label": ["inbox"]})),
         ("label: -inbox", ("", {"-label": ["inbox"]})),
+        ("-label: -inbox", ("", {"-label": ["inbox"]})),
         ('label:"" -probe', ("", {"-label": ["probe"]})),
+        ("label:-inbox", ("", {"label": ["-inbox"]})),
+        ("-label:-inbox", ("", {"-label": ["-inbox"]})),
         ("-in:sent", ("", {"-in": ["sent"]})),
+        ("-in: sent", ("", {"-in": ["sent"]})),
         ("in: -sent", ("", {"-in": ["sent"]})),
+        ("in:-sent", ("", {"in": ["-sent"]})),
+        ('-subject:""', ("", {})),
+        ('-label:" "', ("", {})),
+        ("subject:-", ("", {})),
+        ("label: -", ("", {})),
+        ("-subject:plan+probe", ("+probe", {"-subject": ["plan"]})),
+        ("subject: -label:inbox", ("", {"-subject": ["label:inbox"]})),
         ("- from:bob", ("", {"from": ["bob"]})),
         ("NOT from:bob", ("", {"-from": ["bob"]})),
-        ("-(from:bob)", ("", {"-from": ["bob"]})),
         ("NOT bcc:lena", ("", {"-bcc": ["lena"]})),
-        # Not measured, so read as before: a lowercase `not`, `NOT` before a word, `-(…)` around
-        # another operator, `label:-` and a hyphen inside a word.
+        ("NOT label:inbox", ("", {"-label": ["inbox"]})),
+        ("NOT -from:bob", ("", {"from": ["bob"]})),
+        ("NOT -label:inbox", ("", {"label": ["inbox"]})),
+        ("-(from:bob)", ("", {"-from": ["bob"]})),
+        ("-( subject:plan )", ("", {"-subject": ["plan"]})),
         ("not from:bob", ("not", {"from": ["bob"]})),
-        ("NOT probe", ("NOT probe", {})),
         ("label:-", ("", {"label": ["-"]})),
         ("mary-jane", ("mary-jane", {})),
+        # Not modelled; the comment on `_GMAIL_NEGATABLE` lists these.
+        ("NOT probe", ("NOT probe", {})),
+        ("-has:attachment", ("-has:attachment", {})),
     ],
 )
 def test_gmail_negation_of_subject_label_in_and_not(q, want):
@@ -665,16 +686,18 @@ def test_gmail_negation_of_subject_label_in_over_the_wire(tmp_path):
 
         every = ids("")
         for plain, negated in (
-            ("subject:plan", ("-subject:plan",)),
-            ("label:inbox", ("-label:inbox", "label: -inbox")),
-            ("in:sent", ("-in:sent", "in: -sent")),
+            ("subject:plan", ("-subject:plan", "-subject: plan", "subject:-plan")),
+            ("label:inbox", ("-label:inbox", "-label: inbox", "label: -inbox", "NOT label:inbox")),
+            ("in:sent", ("-in:sent", "-in: sent", "in: -sent", "-(in:sent)")),
             ("from:bob", ("NOT from:bob", "-(from:bob)")),
         ):
             matched = ids(plain)
             assert matched and matched != every, plain
             for q in negated:
                 assert ids(q) == every - matched, q
-        assert ids("- from:bob") == ids("from:bob")
+        assert ids("- from:bob") == ids("NOT -from:bob") == ids("from:bob")
+        assert ids("in:anywhere") == every
+        assert ids("label:-inbox") == ids("in:-sent") == ids("-in:anywhere") == set()
 
 
 def test_github_search_q_parse():
