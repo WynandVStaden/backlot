@@ -4696,3 +4696,26 @@ def test_a_stated_identifier_outranks_another_teams_derived_one(tmp_path):
         h = {"Authorization": settings.admin_token}
         got = gql(c, f'{{ issue(id: "{stated}") {{ identifier title }} }}', h).json()["data"]
         assert got["issue"]["title"] == "states it"
+
+
+@pytest.mark.parametrize("field", ["issues", "users"])
+def test_a_page_answers_false_for_the_direction_it_was_not_asked_in(client, admin_h, field):
+    """`first:` after a cursor answers `hasPreviousPage: false` and `last:` before one
+    `hasNextPage: false`, with rows on both sides of the page, as the docstring of `_connection`
+    measures; the flag for the direction the page was asked in still reads the rows."""
+
+    def page(args):
+        q = "{ %s(%s) { nodes { id } pageInfo { hasNextPage hasPreviousPage startCursor endCursor } } }"
+        r = gql(client, q % (field, args), admin_h)
+        assert "errors" not in r.json(), r.json()
+        return r.json()["data"][field]
+
+    first = page("first: 1")
+    after = page(f'first: 1, after: "{first["pageInfo"]["endCursor"]}"')
+    assert after["nodes"] and after["pageInfo"]["hasNextPage"] is True
+    assert after["pageInfo"]["hasPreviousPage"] is False
+
+    last = page("last: 1")
+    before = page(f'last: 1, before: "{last["pageInfo"]["startCursor"]}"')
+    assert before["nodes"] and before["pageInfo"]["hasPreviousPage"] is True
+    assert before["pageInfo"]["hasNextPage"] is False
