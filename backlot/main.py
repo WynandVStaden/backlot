@@ -1070,6 +1070,40 @@ async def put_a_request_id_on_github_answers(request: Request, call_next):
     return response
 
 
+# The Drive reads real answers when they arrive as a POST that names GET in
+# `X-HTTP-Method-Override`, with the query in a form body (`answer_a_drive_read_sent_as_a_post`).
+_DRIVE_READS_A_POST_CAN_CARRY = ("/drive/v3/files", "/drive/v3/about")
+
+
+@app.middleware("http")
+async def answer_a_drive_read_sent_as_a_post(request: Request, call_next):
+    """A Drive read sent as a POST with `X-HTTP-Method-Override: GET` is answered as the GET it
+    stands for, its form body read as the query string.
+
+    The Google API Python client sends a read this way on its own: `HttpRequest.execute`
+    (google-api-python-client 2.201.0) turns a GET whose URI passes 2048 characters into a POST with
+    `x-http-method-override: GET`, `content-type: application/x-www-form-urlencoded` and the query
+    string as the body. Measured on www.googleapis.com/drive/v3 on 2026-10-21 with a Workspace
+    member's token: `files.list` with a 2,058-byte form body and `about` with `fields=kind` each
+    answered 200 and what the same parameters get on a GET. Only those two paths were measured, so
+    only they are read; an override naming another method, and a query string beside the body, were
+    not measured, and the body is appended to any query string as it stands.
+
+    Registered just before ``vendor_json_media_type``, outside every middleware that reads the
+    method or the query, so they and the router see the GET.
+    """
+    if (
+        request.method == "POST"
+        and request.url.path in _DRIVE_READS_A_POST_CAN_CARRY
+        and request.headers.get("x-http-method-override", "").strip().upper() == "GET"
+    ):
+        body = await request.body()
+        query = request.scope.get("query_string", b"")
+        request.scope["method"] = "GET"
+        request.scope["query_string"] = b"&".join(part for part in (query, body) if part)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def vendor_json_media_type(request: Request, call_next):
     """Put the vendor's own `content-type` on a JSON body, where one is measured.

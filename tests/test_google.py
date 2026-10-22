@@ -12013,3 +12013,25 @@ def test_gmail_hyphenated_address_search(tmp_path, surface, query, expected):
     assert {x["id"] for x in r.json().get(surface, [])} == {
         served_id("gmail", doc_id) for doc_id in expected
     }
+
+
+def test_drive_read_sent_as_a_post_with_a_get_override_is_the_get(client, admin_h):
+    """`answer_a_drive_read_sent_as_a_post`: `files.list` and `about` sent as a POST that names
+    GET in `X-HTTP-Method-Override`, with the query as a form body, answer what the GET does. A
+    POST without the header, or naming another method, is answered as before."""
+    from urllib.parse import urlencode
+
+    form = {"content-type": "application/x-www-form-urlencoded"}
+    q = " or ".join(f"name contains 'Brand{i}'" for i in range(80)) + " or name contains 'Brand'"
+    for path, params in (
+        ("/drive/v3/files", {"q": q, "pageSize": "2", "fields": "kind,files(id,name)"}),
+        ("/drive/v3/about", {"fields": "kind"}),
+    ):
+        got = client.get(path, headers=admin_h, params=params)
+        assert got.status_code == 200, got.text
+        override = {**admin_h, **form, "x-http-method-override": "GET"}
+        posted = client.post(path, headers=override, content=urlencode(params))
+        assert posted.status_code == 200 and posted.json() == got.json(), path
+        for headers in ({**admin_h, **form}, {**admin_h, **form, "x-http-method-override": "PUT"}):
+            before = client.post(path, headers=headers, content=urlencode(params))
+            assert before.status_code != 200, (path, headers)
