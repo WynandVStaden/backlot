@@ -2019,7 +2019,6 @@ async def confluence_cql_search(request: Request):
     refusal = _cql_refusal(tokens)
     if refusal is not None:
         raise refusal
-    cql = _cql_written_back(tokens)
     # An empty `cursor` is none, and of a repeated one the first is read, measured 2026-10-04.
     sent_cursor = (request.query_params.getlist("cursor") or [None])[0]
     after = _cql_search_after(sent_cursor) if sent_cursor else None
@@ -2087,7 +2086,7 @@ async def confluence_cql_search(request: Request):
                 "limit": limit,
                 "size": len(results),
                 "totalSize": total,
-                "cqlQuery": cql,
+                "cqlQuery": _cql_written_back(tokens),
                 "searchDuration": 5,
                 "_links": links,
             }
