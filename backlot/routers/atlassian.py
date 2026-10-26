@@ -2933,17 +2933,19 @@ _JAVA_TRIMMED = "".join(map(chr, range(0x21)))
 # CQL as real's reader splits it, measured on Confluence Cloud on 2026-10-22 and 2026-10-25, the
 # second time with `title~a<c>b` and `title~a<c>` for each ASCII punctuation character `<c>`: a
 # quoted value in either quotes, in which a backslash keeps the next character; an operator, a
-# bracket or a comma; a date such as `2026-01-01`; a number; and a word of ASCII letters, digits and
-# `_`, dotted as `space.key` is. A control character, one past ASCII and those in `DROPPED` are left
-# out as a space is: `title ~ probe*` is `title ~ probe`, and `title~a#b` reads `a` and then `b`.
-# Each other character is a token no clause takes, so `label=a-b` and `title~a:b` cannot be parsed.
+# bracket or a comma; a date such as `2026-01-01` and a number, both in ASCII digits; and a word of
+# ASCII letters, digits and `_`, dotted as `space.key` is. A control character, one past ASCII and
+# those in `DROPPED` are left out as a space is: `title ~ probe*` is `title ~ probe`, `title~a#b`
+# reads `a` and then `b`, and on 2026-10-26 `title~` and U+0663 (an Arabic-Indic three) or U+FF11 (a
+# fullwidth one) had no value. Each other character is a token no clause takes, so `label=a-b` and
+# `title~a:b` cannot be parsed.
 _CQL_TOKEN = re.compile(
     r"""(?P<QUOTED>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
     r"|(?P<OP>!=|!~|>=|<=|=|~|>|<)"
     r"|(?P<PUNCT>[(),])"
-    r"|(?P<DATE>\d{4}-\d{2}-\d{2})"
-    r"|(?P<NUMBER>-\d+|\d+(?![A-Za-z_.]))"
-    r"|(?P<WORD>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)"
+    r"|(?P<DATE>[0-9]{4}-[0-9]{2}-[0-9]{2})"
+    r"|(?P<NUMBER>-[0-9]+|[0-9]+(?![A-Za-z_.]))"
+    r"|(?P<WORD>[A-Za-z0-9_]+(?:[.][A-Za-z0-9_]+)*)"
     r"|(?P<DROPPED>[\s#$%&*+;?@^`{|}\x00-\x1f\x7f]|[^\x00-\x7f])"
     r"|(?P<OTHER>.)",
     re.DOTALL,

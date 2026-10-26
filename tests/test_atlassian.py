@@ -8570,10 +8570,11 @@ _CQL_PARSE_ROWS = [
             ("created > -1d", _CQL_NOT_PARSED),
             ("title~a..b", _CQL_NOT_PARSED),
             ("title~a.", _CQL_NOT_PARSED),
+            ("created>\u0662\u0660\u0662\u0666-01-01", _CQL_NOT_PARSED),
             *[(f"title~a{c}b", _CQL_NOT_PARSED) for c in "!\"'(),-/:<=>[\\]~"],
             *[
                 (f"title~a{c}b", "Unrecognised clause at : b")
-                for c in "#$%&*+;?@^`{|}\x01\x7f" + "é\U0001f600"
+                for c in "#$%&*+;?@^`{|}\x01\x7f" + "é\u0663\U0001f600"
             ],
             ("title~a b c", "Unrecognised clause at : bc"),
             ('title~a "b"', 'Unrecognised clause at : "b"'),
@@ -8583,6 +8584,8 @@ _CQL_PARSE_ROWS = [
             ("title~", "Expecting a value for operator '~' after field 'title'"),
             ("text~*", "Expecting a value for operator '~' after field 'text'"),
             ("title~é", "Expecting a value for operator '~' after field 'title'"),
+            ("title~\u0663", "Expecting a value for operator '~' after field 'title'"),
+            ("title~\uff11", "Expecting a value for operator '~' after field 'title'"),
             ("type==page", "Expecting a value for operator '=' after field 'type' but got '='"),
             ("space=~abc", "Expecting a value for operator '=' after field 'space' but got '~'"),
             ("label=.a", "Expecting a value for operator '=' after field 'label' but got '.'"),
